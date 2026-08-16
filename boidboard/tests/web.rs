@@ -989,7 +989,7 @@ fn ac45_progress_fragment_shows_the_error_of_a_failed_run() {
 #[test]
 fn ac42_new_run_form_is_fronted_by_preset_cards() {
     let all = presets::all();
-    let html = views::new_run_form(&all).into_string();
+    let html = views::new_run_form(&all, &views::Csrf::absent()).into_string();
 
     let form = *dom::start_tags(&html)
         .iter()
@@ -1037,6 +1037,110 @@ fn ac42_new_run_form_is_fronted_by_preset_cards() {
     }
 }
 
+// ─────────────── CSRF — every state-changing form carries a token ───────────────
+//
+// The hand-written forms emitted no `_csrf` field at all, which made the app
+// either CSRF-vulnerable (token check off) or broken (token check on, every
+// submission a 403) depending on one config toggle. These tests pin the markup
+// half: the field name and token come from the framework's own request
+// extensions, never from a value this crate invents.
+
+/// The hidden token input on a form, if it has one.
+fn csrf_input<'a>(html: &'a str, field: &str) -> Option<&'a str> {
+    dom::start_tags(html).into_iter().find(|t| {
+        t.starts_with("<input")
+            && dom::attr(t, "type").as_deref() == Some("hidden")
+            && dom::attr(t, "name").as_deref() == Some(field)
+    })
+}
+
+#[test]
+fn csrf_the_new_run_form_carries_the_token_the_middleware_supplied() {
+    let all = presets::all();
+    let csrf = views::Csrf::new(views::Csrf::DEFAULT_FIELD, "tok-abc123");
+    let html = views::new_run_form(&all, &csrf).into_string();
+
+    let input = csrf_input(&html, "_csrf").unwrap_or_else(|| {
+        panic!("POST /runs must carry a hidden `_csrf` input or every submission 403s:\n{html}")
+    });
+    assert_eq!(dom::attr(input, "value").as_deref(), Some("tok-abc123"));
+}
+
+#[test]
+fn csrf_the_cancel_form_carries_the_token_too() {
+    let csrf = views::Csrf::new(views::Csrf::DEFAULT_FIELD, "tok-cancel");
+    let html = views::cancel_form(9, &csrf).into_string();
+
+    let input = csrf_input(&html, "_csrf")
+        .unwrap_or_else(|| panic!("POST /runs/9/cancel is a state change too:\n{html}"));
+    assert_eq!(dom::attr(input, "value").as_deref(), Some("tok-cancel"));
+}
+
+#[test]
+fn csrf_the_configured_field_name_is_honoured_rather_than_hardcoded() {
+    let all = presets::all();
+    // `security.csrf.form_field` is configurable, and the middleware publishes
+    // the configured name in request extensions precisely so a template can use
+    // it. A view that hardcoded `_csrf` would silently 403 under a renamed field.
+    let csrf = views::Csrf::new("authenticity_token", "tok-renamed");
+    let html = views::new_run_form(&all, &csrf).into_string();
+
+    assert!(
+        csrf_input(&html, "_csrf").is_none(),
+        "the default name must not be emitted when another one is configured:\n{html}"
+    );
+    let input = csrf_input(&html, "authenticity_token")
+        .unwrap_or_else(|| panic!("the configured field name must be used:\n{html}"));
+    assert_eq!(dom::attr(input, "value").as_deref(), Some("tok-renamed"));
+}
+
+#[test]
+fn csrf_no_middleware_means_no_field_rather_than_an_invented_token() {
+    let all = presets::all();
+    let absent = views::Csrf::absent();
+    assert_eq!(absent, views::Csrf::default());
+
+    for html in [
+        views::new_run_form(&all, &absent).into_string(),
+        views::cancel_form(9, &absent).into_string(),
+    ] {
+        assert!(
+            !html.contains("_csrf"),
+            "with no CSRF layer mounted there is no token to emit, and a made-up \
+             one would be worse than none:\n{html}"
+        );
+    }
+}
+
+#[test]
+fn csrf_the_compare_form_stays_a_get_and_needs_no_token() {
+    // A `GET` is in `security.csrf.safe_methods` by default, so the compare
+    // form neither needs nor should carry a token — it would land in the query
+    // string, be bookmarked, and end up in logs and referrers.
+    let mut d = detail_fixture(run_status::COMPLETED);
+    d.csrf = views::Csrf::new(views::Csrf::DEFAULT_FIELD, "tok-detail");
+    let html = views::run_detail_page(&d).into_string();
+
+    let compare = dom::with_class(&html, "compare-cta");
+    assert_eq!(compare.len(), 1);
+    assert_eq!(dom::attr(compare[0], "method").as_deref(), Some("get"));
+    assert!(
+        !html.contains("tok-detail"),
+        "a terminal run has no POST form on its page, so no token belongs in it:\n{html}"
+    );
+}
+
+#[test]
+fn csrf_the_detail_page_hands_its_token_to_the_cancel_form() {
+    let mut d = detail_fixture(run_status::RUNNING);
+    d.csrf = views::Csrf::new(views::Csrf::DEFAULT_FIELD, "tok-detail");
+    let html = views::run_detail_page(&d).into_string();
+
+    let input = csrf_input(&html, "_csrf")
+        .unwrap_or_else(|| panic!("the page's cancel form must be submittable:\n{html}"));
+    assert_eq!(dom::attr(input, "value").as_deref(), Some("tok-detail"));
+}
+
 // ───────── AC-43 / AC-44 / AC-47 — the assembled run detail page ─────────
 
 fn detail_fixture(status: &str) -> views::RunDetail {
@@ -1066,6 +1170,8 @@ fn detail_fixture(status: &str) -> views::RunDetail {
             metrics(0.6, 5.0, 1, 1.5),
             metrics(0.9, 4.0, 2, 1.8),
         ],
+        stuck: false,
+        csrf: views::Csrf::absent(),
     }
 }
 
@@ -1110,6 +1216,199 @@ fn ac43_run_detail_page_renders_a_run_that_has_no_frames_yet() {
     assert_eq!(dom::count_class(&html, "sparkline"), 4);
     assert_eq!(dom::count_class(&html, "provenance"), 1);
     assert!(!html.contains("NaN"));
+}
+
+// ───────── AC-33 — cancel is reachable from the product, not just the API ─────────
+//
+// `POST /runs/{id}/cancel` was mounted, documented and covered by an
+// integration test that posted to it directly — and had no button anywhere in
+// the interface, so no user could ever reach it. These are the tests that would
+// have caught that.
+
+#[test]
+fn ac33_a_live_run_offers_a_cancel_button_that_posts_to_the_cancel_route() {
+    let html = views::run_detail_page(&detail_fixture(run_status::RUNNING)).into_string();
+
+    let forms = dom::with_class(&html, "cancel-run");
+    assert_eq!(
+        forms.len(),
+        1,
+        "a running run must offer exactly one cancel control:\n{html}"
+    );
+    assert_eq!(
+        dom::attr(forms[0], "method").as_deref(),
+        Some("post"),
+        "cancelling is a state change, so it must be a POST:\n{}",
+        forms[0]
+    );
+    assert_eq!(
+        dom::attr(forms[0], "action"),
+        Some(boidboard::routes::paths::cancel_run(5)),
+        "the form must target the route that actually cancels the run:\n{}",
+        forms[0]
+    );
+    assert!(
+        html.contains("Cancel run"),
+        "the button must say what it does:\n{html}"
+    );
+}
+
+#[test]
+fn ac33_a_queued_run_can_be_cancelled_but_a_terminal_one_cannot() {
+    for live in [run_status::QUEUED, run_status::RUNNING] {
+        let html = views::run_detail_page(&detail_fixture(live)).into_string();
+        assert_eq!(
+            dom::count_class(&html, "cancel-run"),
+            1,
+            "`{live}` is not terminal, so the run is still cancellable:\n{html}"
+        );
+    }
+    for done in [
+        run_status::COMPLETED,
+        run_status::CANCELLED,
+        run_status::FAILED,
+        run_status::BUDGET_EXCEEDED,
+    ] {
+        let html = views::run_detail_page(&detail_fixture(done)).into_string();
+        assert_eq!(
+            dom::count_class(&html, "cancel-run"),
+            0,
+            "`{done}` is terminal: offering a cancel button promises something \
+             the route will not do:\n{html}"
+        );
+    }
+}
+
+// ───────── AC-27 — stuck detection, reachable from the product ─────────
+//
+// `boids_core::metrics::is_stuck` was correct and well tested and had no
+// caller, so the application's answer to "does it detect stuck flocks?" was
+// "only in a unit test". `analysis::run_is_stuck` is the caller, and it is pure
+// — it takes already-loaded frames, so these tests need no database.
+
+/// One stored frame whose `agents` column is in the **wire form the workflow
+/// actually writes**: `SimState`'s own array of exact-decimal strings, not a
+/// directly-serialized `Vec<Agent>`.
+fn stored_frame(run_id: i64, tick: i32, agents: Vec<Agent>) -> boidboard::models::Frame {
+    let state = boids_core::sim::SimState {
+        tick: u32::try_from(tick).expect("non-negative fixture tick"),
+        agents,
+    };
+    let mut wire = serde_json::to_value(&state).expect("SimState serializes");
+    let agents = wire
+        .get_mut("agents")
+        .map(serde_json::Value::take)
+        .expect("the wire form has an agents array");
+    boidboard::models::Frame {
+        id: i64::from(tick) + 1,
+        run_id,
+        tick,
+        agents,
+        state_hash: state.state_hash_hex(),
+        metrics: serde_json::Value::Null,
+    }
+}
+
+/// A run whose single agent walks steadily east: net displacement equals path
+/// length, so straightness is 1 and the flock is plainly making progress.
+fn cruising_frames(count: i32) -> Vec<boidboard::models::Frame> {
+    (0..count)
+        .map(|t| {
+            let x = 10.0 + f64::from(t) * 2.0;
+            stored_frame(1, t, vec![agent(0, (x, 40.0), (2.0, 0.0))])
+        })
+        .collect()
+}
+
+/// A run whose flock ping-pongs between two nearby points: it walks a long path
+/// and ends up where it started, which is exactly the tortuosity `is_stuck`
+/// measures.
+fn oscillating_frames(count: i32) -> Vec<boidboard::models::Frame> {
+    (0..count)
+        .map(|t| {
+            let x = if t % 2 == 0 { 100.0 } else { 106.0 };
+            stored_frame(1, t, vec![agent(0, (x, 40.0), (6.0, 0.0))])
+        })
+        .collect()
+}
+
+#[test]
+fn ac27_a_flock_that_keeps_making_progress_is_not_stuck() {
+    let world = World::new(200.0, 150.0);
+    let frames = cruising_frames(40);
+    assert!(
+        frames.len() > boidboard::analysis::STUCK_WINDOW,
+        "the fixture must carry enough evidence to judge on"
+    );
+    assert!(
+        !boidboard::analysis::run_is_stuck(&frames, &world),
+        "a flock cruising in a straight line is the definition of not stuck"
+    );
+}
+
+#[test]
+fn ac27_a_flock_oscillating_in_place_is_reported_stuck() {
+    let world = World::new(200.0, 150.0);
+    assert!(
+        boidboard::analysis::run_is_stuck(&oscillating_frames(40), &world),
+        "a centroid that walks a long path back to where it started is stuck"
+    );
+}
+
+#[test]
+fn ac27_stuckness_is_never_claimed_on_absent_evidence() {
+    let world = World::new(200.0, 150.0);
+    assert!(
+        !boidboard::analysis::run_is_stuck(&[], &world),
+        "a run with no frames has not been shown to be stuck"
+    );
+
+    let short = i32::try_from(boidboard::analysis::STUCK_WINDOW).expect("small window") - 1;
+    assert!(
+        !boidboard::analysis::run_is_stuck(&oscillating_frames(short), &world),
+        "fewer samples than the window is not enough to call a run stuck"
+    );
+}
+
+#[test]
+fn ac27_stuckness_is_read_from_the_wire_form_the_workflow_actually_writes() {
+    let world = World::new(200.0, 150.0);
+    let mut frames = oscillating_frames(40);
+
+    // Every frame is unreadable now, so no centroid path can be built at all —
+    // and an undecodable run must read as "no evidence", not as "stuck".
+    for frame in &mut frames {
+        frame.agents = serde_json::json!("not a flock");
+    }
+    assert!(
+        !boidboard::analysis::run_is_stuck(&frames, &world),
+        "frames that do not decode are missing evidence, not proof of stuckness"
+    );
+}
+
+#[test]
+fn ac27_the_run_detail_page_badges_a_stuck_run_and_only_a_stuck_run() {
+    let mut d = detail_fixture(run_status::RUNNING);
+
+    d.stuck = false;
+    let html = views::run_detail_page(&d).into_string();
+    assert_eq!(
+        dom::count_class(&html, "stuck-badge"),
+        0,
+        "a run that is making progress must not be labelled stuck:\n{html}"
+    );
+
+    d.stuck = true;
+    let html = views::run_detail_page(&d).into_string();
+    assert_eq!(
+        dom::count_class(&html, "stuck-badge"),
+        1,
+        "AC-27: a stuck run must say so on its own page:\n{html}"
+    );
+    assert!(
+        html.to_lowercase().contains("stuck"),
+        "the badge must be readable, not just selectable:\n{html}"
+    );
 }
 
 // ═══════════════════════ route layer (AC-48: TestApp + selectors) ═══════════════════════
@@ -1313,6 +1612,58 @@ async fn ac42_new_run_route_is_fronted_by_preset_cards() {
             r#"input[type="radio"][name="preset"]"#,
             presets::all().len(),
         );
+}
+
+/// The route table with CSRF **actually switched on**, which is the
+/// configuration `prod` runs and the one the hand-written forms were broken
+/// under: every POST was a 403 because no form emitted a `_csrf` field.
+fn csrf_web_client() -> TestClient {
+    migrate_once();
+    TestApp::new()
+        .routes(all_routes())
+        .with_transactional_db(TEST_DB_URL)
+        .layer(autumn_web::security::CsrfLayer::from_config(
+            &autumn_web::security::CsrfConfig {
+                enabled: true,
+                ..autumn_web::security::CsrfConfig::default()
+            },
+        ))
+        .build()
+}
+
+#[tokio::test]
+async fn csrf_the_rendered_new_run_form_submits_successfully_under_an_enabled_csrf_layer() {
+    let client = csrf_web_client();
+
+    let page = client.get("/runs/new").send().await;
+    page.assert_ok()
+        .assert_selector(r#"form.new-run input[type="hidden"][name="_csrf"]"#);
+    let token = csrf_input(&page.text(), "_csrf")
+        .and_then(|input| dom::attr(input, "value"))
+        .expect("the form carries a token");
+
+    // The exact submission the rendered form produces — plus the cookie the
+    // same response set, which `TestClient`'s jar replays automatically.
+    let created = client
+        .post("/runs")
+        .form(&format!("preset=nervous-swarm&_csrf={token}"))
+        .send()
+        .await;
+    assert_eq!(
+        created.status,
+        303,
+        "the form as rendered must be accepted, not rejected as a forgery: {}",
+        created.text()
+    );
+
+    // And the protection is real rather than absent: the same POST without the
+    // field the form emits is refused.
+    client
+        .post("/runs")
+        .form("preset=nervous-swarm")
+        .send()
+        .await
+        .assert_status(403);
 }
 
 #[tokio::test]
@@ -1564,6 +1915,49 @@ async fn ac47_run_detail_route_surfaces_the_reproducibility_hash() {
 }
 
 #[tokio::test]
+async fn ac33_the_rendered_detail_page_offers_a_cancel_button_only_while_the_run_is_live() {
+    let client = web_client();
+    let pool = client.state().pool().expect("transactional pool").clone();
+    let scenario = seed_scenario(&pool, "Classic Flock", &sample_config()).await;
+
+    let live = seed_run(
+        &pool,
+        &scenario,
+        run_status::RUNNING,
+        6,
+        None,
+        &sample_frames(),
+    )
+    .await;
+    client
+        .get(&format!("/runs/{}", live.id))
+        .send()
+        .await
+        .assert_ok()
+        .assert_selector(&format!(
+            r#"form.cancel-run[method="post"][action="/runs/{}/cancel"]"#,
+            live.id
+        ))
+        .assert_selector("form.cancel-run button[type=\"submit\"]");
+
+    let done = seed_run(
+        &pool,
+        &scenario,
+        run_status::COMPLETED,
+        6,
+        Some("deadbeefcafe"),
+        &sample_frames(),
+    )
+    .await;
+    client
+        .get(&format!("/runs/{}", done.id))
+        .send()
+        .await
+        .assert_ok()
+        .assert_no_selector("form.cancel-run");
+}
+
+#[tokio::test]
 async fn run_detail_route_404s_for_a_run_that_does_not_exist() {
     web_client()
         .get("/runs/987654321")
@@ -1761,7 +2155,42 @@ fn ac46_detail_page_offers_a_compare_form_prefilled_with_this_run() {
 #[test]
 fn ac50_handlers_do_no_rendering_and_views_do_no_io() {
     const ROUTES_SRC: &str = include_str!("../src/routes.rs");
-    const VIEWS_SRC: &str = include_str!("../src/views.rs");
+    const ANALYSIS_SRC: &str = include_str!("../src/analysis.rs");
+    // `views` is a directory now; the purity rule applies to every file in it,
+    // so the guard reads all three rather than whichever one it was written
+    // against. A fourth file added without being listed here is caught by the
+    // `views/mod.rs` check below.
+    const VIEWS_MOD_SRC: &str = include_str!("../src/views/mod.rs");
+    const VIEWS_SRC: &str = concat!(
+        include_str!("../src/views/mod.rs"),
+        include_str!("../src/views/pages.rs"),
+        include_str!("../src/views/svg.rs"),
+        include_str!("../src/views/style.rs"),
+    );
+
+    for declared in ["pub mod pages;", "pub mod style;", "pub mod svg;"] {
+        assert!(
+            VIEWS_MOD_SRC.contains(declared),
+            "`views/mod.rs` must declare exactly the files this guard reads — \
+             `{declared}` is missing, so a view file may be escaping the purity check"
+        );
+    }
+    assert_eq!(
+        VIEWS_MOD_SRC.matches("pub mod ").count(),
+        3,
+        "a new `views/` submodule must be added to the AC-50 purity guard too"
+    );
+
+    // `analysis.rs` is held to the same purity rule as `views.rs` and for the
+    // same reason: it answers a question *about* loaded data, so it must be
+    // callable — and testable — with a fixture and no infrastructure. The moment
+    // it grows a query, "is this run stuck?" stops being a unit test.
+    for forbidden in [".await", "diesel", "AsyncPgConnection", "AutumnResult"] {
+        assert!(
+            !ANALYSIS_SRC.contains(forbidden),
+            "AC-50: `analysis.rs` must stay pure `fn(data) -> answer` — found `{forbidden}`"
+        );
+    }
 
     for forbidden in [
         "html!",
@@ -1808,7 +2237,9 @@ fn ac50_handlers_do_no_rendering_and_views_do_no_io() {
         views::metrics_panel(&series).into_string(),
         views::provenance_panel(&run).into_string(),
         views::progress_fragment(&run).into_string(),
-        views::new_run_form(&presets::all()).into_string(),
+        views::new_run_form(&presets::all(), &views::Csrf::absent()).into_string(),
+        views::cancel_form(run.id, &views::Csrf::new("_csrf", "t")).into_string(),
+        views::stuck_badge().into_string(),
         views::run_row(&views::RunSummary {
             run: run.clone(),
             scenario_name: "s".to_owned(),

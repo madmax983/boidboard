@@ -13,6 +13,26 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
+# Secrets.
+#
+# autumn-web loads `.env`, `.env.local`, `.env.{profile}` and
+# `.env.{profile}.local` into the config layer, and `BOIDBOARD_HARVEST_ADMIN_TOKEN`
+# — the credential that unlocks Harvest's engine-level management API — is read
+# from exactly those files. None of them were ignored, so the first person to
+# set it locally would have committed it.
+#
+# `.env.example` is the one that stays tracked: it documents the variable names
+# without carrying a value.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# NOT ignored, deliberately: `autumn-dev.toml` is configuration, not a secret —
+# it names the local database everyone on the project uses and is meant to be
+# committed. `.env*` above is where anything with a real credential goes.
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore

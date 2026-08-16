@@ -188,7 +188,10 @@ mod tests {
     /// (parallel) and positive dot product (not merely antiparallel).
     fn assert_same_direction(before: Vec2, after: Vec2) {
         let cross = before.x * after.y - before.y * after.x;
-        assert!(cross.abs() < 1e-9, "direction changed: {before:?} -> {after:?}");
+        assert!(
+            cross.abs() < 1e-9,
+            "direction changed: {before:?} -> {after:?}"
+        );
         assert!(
             before.dot(after) > 0.0,
             "direction flipped: {before:?} -> {after:?}"
@@ -280,7 +283,10 @@ mod tests {
         assert_eq!(Vec2::new(1e-300, 0.0).normalize(), Vec2::new(1.0, 0.0));
         // Subnormals cannot round-trip to unit length, but must stay finite.
         let sub = Vec2::new(5e-324, 5e-324).normalize();
-        assert!(sub.is_finite(), "subnormal normalize went non-finite: {sub:?}");
+        assert!(
+            sub.is_finite(),
+            "subnormal normalize went non-finite: {sub:?}"
+        );
     }
 
     #[test]

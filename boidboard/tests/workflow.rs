@@ -15,9 +15,8 @@ use std::collections::BTreeMap;
 
 use autumn_harvest::event::WorkflowEvent;
 use autumn_harvest::testing::{ReplayStatus, TestRunOutcome, WorkflowTestEnv};
+use autumn_web::error::AutumnError;
 use autumn_web::test::{TestApp, TestClient};
-use boids_core::SimParams;
-use boids_core::sim::SimState;
 use boidboard::models::run::status as run_status;
 use boidboard::models::run_signal::kind as signal_kind;
 use boidboard::models::{NewRun, NewScenario, Run, RunSignal};
@@ -27,9 +26,11 @@ use boidboard::repositories::{
 };
 use boidboard::schema::{run_signals, runs};
 use boidboard::workflow::{
-    BatchCursor, BatchRequest, FinalizeRequest, SignalRecord, finalize_run_core,
-    record_signal_core, simulate_batch_core, simulation_workflow_info,
+    BatchCursor, BatchRequest, FinalizeRequest, SignalRecord, classify_activity_error, error_type,
+    finalize_run_core, record_signal_core, simulate_batch_core, simulation_workflow_info,
 };
+use boids_core::SimParams;
+use boids_core::sim::SimState;
 use diesel::{ExpressionMethods as _, QueryDsl as _, SelectableHelper as _};
 use diesel_async::AsyncPgConnection;
 use diesel_async::RunQueryDsl as _;
@@ -125,7 +126,11 @@ fn history_bytes(events: &[WorkflowEvent]) -> usize {
     events
         .iter()
         .filter(|event| !matches!(event, WorkflowEvent::WorkflowStarted { .. }))
-        .map(|event| serde_json::to_string(event).expect("event serializes").len())
+        .map(|event| {
+            serde_json::to_string(event)
+                .expect("event serializes")
+                .len()
+        })
         .sum()
 }
 
@@ -143,6 +148,30 @@ async fn assert_replays(outcome: &TestRunOutcome) {
     assert!(
         matches!(report.status, ReplayStatus::ReplaySucceeded),
         "replay diverged: {report}"
+    );
+}
+
+/// The same determinism check for a workflow that legitimately **fails**.
+///
+/// A failing run replays to `WorkflowFailed`, not `ReplaySucceeded` — the
+/// workflow really did return `Err`, and re-running its history reproduces that.
+/// The claim being pinned is therefore narrower and is the one that matters:
+/// **no `NonDeterminismDetected`**. That is what makes it safe for the failure
+/// path to issue a `finalize_run` command after an `ActivityFailed`, and it is
+/// exactly what the engine-cancel path could not promise.
+async fn assert_replays_without_diverging(outcome: &TestRunOutcome) {
+    let report = outcome
+        .replay_check(simulation_workflow_info().handler)
+        .await;
+    assert!(
+        !matches!(report.status, ReplayStatus::NonDeterminismDetected { .. }),
+        "replay diverged: {report}"
+    );
+    assert_eq!(
+        report.events_replayed,
+        outcome.events().len(),
+        "replay must consume the whole history, including the commands issued \
+         after the activity failed: {report}"
     );
 }
 
@@ -551,6 +580,130 @@ async fn a_cursor_for_the_wrong_run_fails_the_workflow_rather_than_being_applied
     );
 }
 
+// ────────── a run whose batch fails must not be stranded at `running` ──────────
+//
+// Nothing in the application ever wrote `status = 'failed'`. The one
+// `finalize_run` call site omitted the `error` field, so `runs.error` was always
+// NULL and a run whose activity exhausted its retries sat at `running` forever
+// while every open tab polled its progress endpoint every two seconds. These
+// tests pin the in-band half of the fix.
+
+#[tokio::test]
+async fn a_batch_failure_finalizes_the_run_as_failed_before_the_workflow_gives_up() {
+    let env = WorkflowTestEnv::new()
+        .mock_activity("simulate_batch", |_| {
+            Err("simulate_batch: connection reset by peer".to_owned())
+        })
+        .mock_activity("finalize_run", |_| Ok(json!({ "finalized": true })))
+        .mock_activity("record_signal", |_| Ok(json!({ "recorded": true })));
+
+    let outcome = env
+        .run(simulation_workflow_info().handler, workflow_input(500, 100))
+        .await;
+
+    let error = outcome
+        .result
+        .clone()
+        .expect_err("a failed batch is not a successful run");
+    assert!(
+        error.contains("connection reset by peer"),
+        "the workflow still surfaces the real failure: {error}"
+    );
+
+    let finalize = scheduled_inputs(outcome.events(), "finalize_run");
+    assert_eq!(
+        finalize.len(),
+        1,
+        "the run must be closed out exactly once, not left at `running` forever"
+    );
+    assert_eq!(finalize[0]["status"], json!(run_status::FAILED));
+    assert_eq!(finalize[0]["run_id"], json!(RUN_ID));
+    assert_eq!(
+        finalize[0]["ticks_completed"],
+        json!(0),
+        "no batch completed, so no ticks were reached"
+    );
+    assert_eq!(
+        finalize[0]["final_state_hash"],
+        json!(""),
+        "an empty hash means `no batch ever completed`, which is the truth here"
+    );
+    let recorded = finalize[0]["error"]
+        .as_str()
+        .expect("`FinalizeRequest.error` must actually be populated");
+    assert!(
+        recorded.contains("connection reset by peer"),
+        "the row must say why the run failed, or the UI has nothing to show: {recorded}"
+    );
+
+    assert_replays_without_diverging(&outcome).await;
+}
+
+#[tokio::test]
+async fn a_failed_run_keeps_the_ticks_its_completed_batches_reached() {
+    let env = WorkflowTestEnv::new()
+        // Call 1 falls through to the ordinary mock and advances to tick 100;
+        // call 2 fails.
+        .mock_activity("simulate_batch", flock_cursor_mock(25, 500))
+        .mock_activity_attempt(
+            "simulate_batch",
+            2,
+            Err("run 4242 has invalid parameters: max_speed must be > 0".to_owned()),
+        )
+        .mock_activity("finalize_run", |_| Ok(json!({ "finalized": true })))
+        .mock_activity("record_signal", |_| Ok(json!({ "recorded": true })));
+
+    let outcome = env
+        .run(simulation_workflow_info().handler, workflow_input(500, 100))
+        .await;
+    outcome
+        .result
+        .clone()
+        .expect_err("the second batch failed, so the run failed");
+
+    let finalize = scheduled_inputs(outcome.events(), "finalize_run");
+    assert_eq!(finalize.len(), 1);
+    assert_eq!(finalize[0]["status"], json!(run_status::FAILED));
+    assert_eq!(
+        finalize[0]["ticks_completed"],
+        json!(100),
+        "the frames the first batch wrote are real work and the row must own them"
+    );
+    assert_eq!(
+        finalize[0]["final_state_hash"],
+        json!(expected_flock_hash(25)),
+        "the last checkpoint the run genuinely reached is its provenance"
+    );
+
+    assert_replays_without_diverging(&outcome).await;
+}
+
+#[tokio::test]
+async fn the_failure_finalizer_is_a_command_and_not_a_second_engine_cancel_path() {
+    // The distinction this pins is a replay one. An `ActivityFailed` **is**
+    // consumed by the replay matcher, so issuing `finalize_run` after one is
+    // deterministic. A `WorkflowCancelled` event is not, which is why
+    // `ac33_engine_cancellation_kills_the_run_without_issuing_another_command`
+    // demands the opposite behaviour there. A later "unification" of the two
+    // paths breaks one of these two tests, by construction.
+    let env = WorkflowTestEnv::new()
+        .mock_activity("simulate_batch", |_| Err("boom".to_owned()))
+        .mock_activity("finalize_run", |_| Ok(json!({ "finalized": true })))
+        .mock_activity("record_signal", |_| Ok(json!({ "recorded": true })));
+
+    let outcome = env
+        .run(simulation_workflow_info().handler, workflow_input(500, 100))
+        .await;
+
+    assert_eq!(
+        activity_names(outcome.events()),
+        vec!["finalize_run".to_owned(), "simulate_batch".to_owned()],
+        "the failure path issues exactly one extra command: the finalizer"
+    );
+    // The whole point: the history this produced replays without diverging.
+    assert_replays_without_diverging(&outcome).await;
+}
+
 // ───────────────────────────── AC-34 ─────────────────────────────
 
 #[tokio::test]
@@ -706,14 +859,25 @@ async fn seed_run(
     let config = serde_json::to_value(&params).expect("SimParams serializes");
     let config_hash = boidboard::models::canonical_config_hash(&config);
 
-    let scenario = PgScenarioRepository::with_pool_untracked(pool.clone())
-        .save(&NewScenario {
-            name: format!("workflow-test-{agent_count}-{seed}"),
-            config: config.clone(),
-            config_hash: config_hash.clone(),
-        })
+    // Find-or-create, exactly as `create_run` does — `scenarios.config_hash` is
+    // UNIQUE, so two runs of the same parameter set share one scenario row
+    // rather than colliding.
+    let scenarios = PgScenarioRepository::with_pool_untracked(pool.clone());
+    let existing = scenarios
+        .find_by_config_hash(config_hash.clone())
         .await
-        .expect("scenario saves");
+        .expect("scenario lookup");
+    let scenario = match existing.into_iter().next() {
+        Some(found) => found,
+        None => scenarios
+            .save(&NewScenario {
+                name: format!("workflow-test-{agent_count}-{seed}"),
+                config: config.clone(),
+                config_hash: config_hash.clone(),
+            })
+            .await
+            .expect("scenario saves"),
+    };
 
     PgRunRepository::with_pool_untracked(pool.clone())
         .save(&NewRun {
@@ -742,6 +906,124 @@ fn batch_request(run_id: i64, from_tick: u32, batch_ticks: u32) -> BatchRequest 
         metrics_every: 10,
         overrides: BTreeMap::new(),
     }
+}
+
+// ────────── activity failures are classified, not all called `Database` ──────────
+//
+// Every activity shell used to `map_err(|e| HarvestError::Database(e.to_string()))`,
+// so a permanently invalid config was retried three times with backoff and then
+// reported to metrics as a database fault. The `_core`/shell split is the
+// natural classification point: a 422 from a core is a *permanent* failure and
+// must skip the remaining retries.
+
+#[test]
+fn a_422_from_a_core_is_a_permanent_failure_and_anything_else_is_transient() {
+    let permanent = classify_activity_error(&AutumnError::unprocessable_msg(
+        "run 7 has invalid parameters: max_speed is -1",
+    ));
+    assert!(
+        permanent.non_retryable,
+        "an unprocessable input fails identically on every attempt; retrying it \
+         three times with backoff wastes a worker and delays the failure"
+    );
+    assert_eq!(permanent.error_type, error_type::INVALID_CONFIG);
+    assert!(permanent.message.contains("max_speed is -1"));
+
+    let transient = classify_activity_error(&AutumnError::internal_server_error_msg(
+        "connection pool timed out",
+    ));
+    assert!(
+        !transient.non_retryable,
+        "a pool timeout is exactly what the retry policy exists for"
+    );
+    assert_eq!(transient.error_type, error_type::DATABASE);
+    assert!(transient.message.contains("connection pool timed out"));
+}
+
+#[test]
+fn the_error_types_are_stable_low_cardinality_names() {
+    // `error_type` is a metrics dimension and a `RetryPolicy::non_retryable_errors`
+    // matcher input. It must be a *class*, not a formatted message, or every
+    // reworded error string silently changes a dashboard and a retry policy.
+    for name in [error_type::INVALID_CONFIG, error_type::DATABASE] {
+        assert!(
+            !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric()),
+            "`{name}` must be a bare class name"
+        );
+    }
+    assert_ne!(error_type::INVALID_CONFIG, error_type::DATABASE);
+}
+
+#[tokio::test]
+async fn a_steer_that_invalidates_the_config_is_not_retried() {
+    let client = test_client();
+    let pool = client.state().pool().expect("transactional pool").clone();
+    let run = seed_run(&pool, 8, 100, 5).await;
+    let mut conn = pool.get().await.expect("checkout connection");
+
+    let mut request = batch_request(run.id, 0, 10);
+    request.overrides.insert("max_speed".to_owned(), -1.0);
+
+    let error = simulate_batch_core(&mut conn, &request)
+        .await
+        .expect_err("a negative max_speed is not a simulable configuration");
+    let failure = classify_activity_error(&error);
+
+    assert!(
+        failure.non_retryable,
+        "`{}` is permanent: the same overrides produce the same rejection forever",
+        failure.message
+    );
+    assert_eq!(failure.error_type, error_type::INVALID_CONFIG);
+    assert!(
+        failure.message.contains("invalid parameters"),
+        "the classification must keep the diagnosis: {}",
+        failure.message
+    );
+}
+
+#[tokio::test]
+async fn resuming_from_a_checkpoint_that_does_not_exist_is_not_retried() {
+    let client = test_client();
+    let pool = client.state().pool().expect("transactional pool").clone();
+    let run = seed_run(&pool, 8, 300, 5).await;
+    let mut conn = pool.get().await.expect("checkout connection");
+
+    // Nothing has run, so there is no tick-250 frame to resume out of — and no
+    // number of retries will conjure one.
+    let error = simulate_batch_core(&mut conn, &batch_request(run.id, 250, 50))
+        .await
+        .expect_err("there is no checkpoint at tick 250");
+    let failure = classify_activity_error(&error);
+
+    assert!(failure.non_retryable, "{}", failure.message);
+    assert_eq!(failure.error_type, error_type::INVALID_CONFIG);
+    assert!(failure.message.contains("no checkpoint at tick 250"));
+}
+
+#[tokio::test]
+async fn finalizing_into_a_non_terminal_status_is_not_retried() {
+    let client = test_client();
+    let pool = client.state().pool().expect("transactional pool").clone();
+    let run = seed_run(&pool, 4, 50, 1).await;
+    let mut conn = pool.get().await.expect("checkout connection");
+
+    let error = finalize_run_core(
+        &mut conn,
+        &FinalizeRequest {
+            run_id: run.id,
+            status: run_status::RUNNING.to_owned(),
+            ticks_completed: 10,
+            final_state_hash: String::new(),
+            error: None,
+        },
+    )
+    .await
+    .expect_err("`running` is not a terminal status");
+
+    let failure = classify_activity_error(&error);
+    assert!(failure.non_retryable, "{}", failure.message);
+    assert_eq!(failure.error_type, error_type::INVALID_CONFIG);
 }
 
 // ───────────────────────────── AC-32 ─────────────────────────────
@@ -1046,10 +1328,12 @@ async fn ac36_a_run_resumed_from_its_postgres_checkpoint_reaches_the_same_final_
         let mut cursor = 0;
         let mut hash = String::new();
         for _ in 0..2 {
-            let batch =
-                simulate_batch_core(&mut conn, &batch_request(interrupted.id, cursor, RESUME_BATCH))
-                    .await
-                    .expect("pre-crash batch");
+            let batch = simulate_batch_core(
+                &mut conn,
+                &batch_request(interrupted.id, cursor, RESUME_BATCH),
+            )
+            .await
+            .expect("pre-crash batch");
             cursor = batch.next_tick;
             hash = batch.state_hash;
         }
@@ -1134,7 +1418,10 @@ fn the_registered_activity_names_match_the_names_the_workflow_schedules() {
         boidboard::workflow::simulate_batch_info().name,
         "simulate_batch"
     );
-    assert_eq!(boidboard::workflow::finalize_run_info().name, "finalize_run");
+    assert_eq!(
+        boidboard::workflow::finalize_run_info().name,
+        "finalize_run"
+    );
     assert_eq!(
         boidboard::workflow::record_signal_info().name,
         "record_signal"
@@ -1147,4 +1434,356 @@ fn the_registered_activity_names_match_the_names_the_workflow_schedules() {
     // The workflow schedules everything onto one queue, and the activities
     // default to it.
     assert_eq!(boidboard::workflow::SIMULATION_QUEUE, "default");
+}
+
+// ═══════════ the reconciler: runs the workflow could not close out ═══════════
+//
+// The in-band failure finalizer above covers everything the workflow *survives*
+// long enough to react to. It cannot cover the cases where the workflow stops
+// existing: a SIGKILLed worker, an engine `terminate`, a history cap, a replay
+// failure. In every one of those the execution reaches a terminal state and the
+// `runs` row does not, so the run sits at `running` forever and every open tab
+// polls it every two seconds.
+//
+// `reconcile` is the backstop. It is deliberately three separable pieces — find
+// stale rows (database), decide (pure), apply (database) — so the decision is
+// unit-testable with no Harvest and the sweep is testable with no engine.
+
+use autumn_harvest::handle::{WorkflowResult, WorkflowResultState};
+use boidboard::reconcile::{EngineView, finalize_for, reconcile_one, stale_non_terminal_runs};
+use chrono::{Duration as ChronoDuration, Utc};
+
+/// A run row in memory, for the pure decision tests.
+fn run_fixture(status: &str) -> Run {
+    let epoch = chrono::NaiveDate::from_ymd_opt(2026, 8, 16)
+        .and_then(|d| d.and_hms_opt(12, 0, 0))
+        .expect("valid fixture timestamp");
+    Run {
+        id: 127,
+        scenario_id: 1,
+        seed: 7,
+        status: status.to_owned(),
+        max_ticks: 300,
+        ticks_completed: 150,
+        config_snapshot: json!({}),
+        config_hash: "cfg".to_owned(),
+        kernel_version: "k".to_owned(),
+        final_state_hash: None,
+        error: None,
+        workflow_execution_id: Some("run-127".to_owned()),
+        created_at: epoch,
+        updated_at: epoch,
+    }
+}
+
+fn snapshot(
+    state: WorkflowResultState,
+    error: Option<&str>,
+    output: Option<Value>,
+) -> WorkflowResult {
+    WorkflowResult {
+        state,
+        output,
+        error: error.map(ToOwned::to_owned),
+        completed_at: None,
+    }
+}
+
+#[test]
+fn the_reconciler_leaves_alone_every_run_it_has_no_business_touching() {
+    // A run that already finished: nothing to reconcile, whatever the engine says.
+    for done in [
+        run_status::COMPLETED,
+        run_status::CANCELLED,
+        run_status::FAILED,
+        run_status::BUDGET_EXCEEDED,
+    ] {
+        let run = run_fixture(done);
+        let terminal = snapshot(WorkflowResultState::Failed, Some("boom"), None);
+        assert!(
+            finalize_for(&run, EngineView::Snapshot(&terminal)).is_none(),
+            "`{done}` is already terminal and must never be rewritten"
+        );
+    }
+
+    let run = run_fixture(run_status::RUNNING);
+
+    // The execution is alive: the run is not stranded, it is working.
+    let live = snapshot(WorkflowResultState::Running, None, None);
+    assert!(finalize_for(&run, EngineView::Snapshot(&live)).is_none());
+
+    // The engine could not be asked. Absence of an answer is not an answer, and
+    // failing a healthy run because Harvest's storage blipped is far worse than
+    // waiting for the next sweep.
+    assert!(finalize_for(&run, EngineView::Unavailable).is_none());
+
+    // A chained execution is terminal for *this* run only; its successor is
+    // still driving the same row.
+    let chained = snapshot(WorkflowResultState::ContinuedAsNew, None, None);
+    assert!(finalize_for(&run, EngineView::Snapshot(&chained)).is_none());
+}
+
+#[test]
+fn a_terminated_or_failed_execution_closes_its_run_out_with_a_reason() {
+    let run = run_fixture(run_status::RUNNING);
+
+    for (state, engine_error, expected) in [
+        (
+            WorkflowResultState::Failed,
+            Some("worker OOM"),
+            run_status::FAILED,
+        ),
+        (
+            WorkflowResultState::Terminated,
+            Some("operator terminate"),
+            run_status::FAILED,
+        ),
+        (WorkflowResultState::TimedOut, None, run_status::FAILED),
+        (
+            WorkflowResultState::Cancelled,
+            Some("engine cancel"),
+            run_status::CANCELLED,
+        ),
+    ] {
+        let snap = snapshot(state, engine_error, None);
+        let request = finalize_for(&run, EngineView::Snapshot(&snap))
+            .unwrap_or_else(|| panic!("{state:?} is terminal and must close the run out"));
+
+        assert_eq!(request.run_id, run.id);
+        assert_eq!(request.status, expected, "for {state:?}");
+        assert_eq!(
+            request.ticks_completed, 150,
+            "the ticks the run really reached are not disclaimed"
+        );
+        let reason = request
+            .error
+            .as_deref()
+            .unwrap_or_else(|| panic!("{state:?} must record why the run stopped"));
+        assert!(
+            !reason.trim().is_empty(),
+            "`runs.error` is the only thing the detail page can show: {reason}"
+        );
+        if let Some(engine_error) = engine_error {
+            assert!(
+                reason.contains(engine_error),
+                "the engine's own reason must survive: {reason}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_completed_execution_is_finalized_on_the_workflows_own_answer() {
+    // The engine says COMPLETED but the row is still `running`, which means the
+    // final `finalize_run` never landed. The workflow's *result payload* is the
+    // authority on what it decided — including `budget_exceeded`, which is a
+    // successful completion of the execution and a non-`completed` run.
+    let run = run_fixture(run_status::RUNNING);
+    let output = json!({
+        "run_id": 127,
+        "status": run_status::BUDGET_EXCEEDED,
+        "ticks_completed": 300,
+        "batches": 6,
+        "final_state_hash": "abcdef0123456789",
+    });
+    let snap = snapshot(WorkflowResultState::Completed, None, Some(output));
+
+    let request = finalize_for(&run, EngineView::Snapshot(&snap)).expect("a completed execution");
+    assert_eq!(request.status, run_status::BUDGET_EXCEEDED);
+    assert_eq!(request.ticks_completed, 300);
+    assert_eq!(request.final_state_hash, "abcdef0123456789");
+
+    // A completed execution whose output says nothing useful still closes the
+    // run rather than leaving it live forever.
+    let bare = snapshot(WorkflowResultState::Completed, None, None);
+    let request = finalize_for(&run, EngineView::Snapshot(&bare)).expect("still finalized");
+    assert_eq!(request.status, run_status::COMPLETED);
+    assert_eq!(request.ticks_completed, 150);
+}
+
+#[test]
+fn a_run_that_names_no_execution_is_failed_rather_than_left_queued_forever() {
+    let mut run = run_fixture(run_status::QUEUED);
+    run.workflow_execution_id = None;
+
+    let request =
+        finalize_for(&run, EngineView::NoExecution).expect("nothing will ever simulate this run");
+    assert_eq!(request.status, run_status::FAILED);
+    let reason = request.error.as_deref().expect("an explanation");
+    assert!(
+        reason.contains("127"),
+        "the reason must name the run it is about: {reason}"
+    );
+    assert!(
+        reason.to_lowercase().contains("workflow"),
+        "the reason must say what was missing: {reason}"
+    );
+}
+
+#[tokio::test]
+async fn the_sweep_selects_stale_non_terminal_runs_and_nothing_else() {
+    let client = test_client();
+    let pool = client.state().pool().expect("transactional pool").clone();
+    let live = seed_run(&pool, 4, 50, 1).await;
+    let done = seed_run(&pool, 4, 50, 2).await;
+    let mut conn = pool.get().await.expect("checkout connection");
+
+    finalize_run_core(
+        &mut conn,
+        &FinalizeRequest {
+            run_id: done.id,
+            status: run_status::COMPLETED.to_owned(),
+            ticks_completed: 50,
+            final_state_hash: "deadbeefdeadbeef".to_owned(),
+            error: None,
+        },
+    )
+    .await
+    .expect("the second run finishes normally");
+
+    // A cutoff in the future makes every row "stale", which is how the staleness
+    // rule is tested without fighting the `runs_set_updated_at` trigger.
+    let stale = stale_non_terminal_runs(
+        &mut conn,
+        Utc::now().naive_utc() + ChronoDuration::hours(1),
+        100,
+    )
+    .await
+    .expect("the sweep query runs");
+    let ids: Vec<i64> = stale.iter().map(|r| r.id).collect();
+    assert!(
+        ids.contains(&live.id),
+        "a non-terminal run older than the cutoff is exactly what the sweep is for"
+    );
+    assert!(
+        !ids.contains(&done.id),
+        "a run that finished normally is not stranded and must not be swept"
+    );
+
+    // A cutoff in the past selects nothing: a run that moved recently is being
+    // worked on, and asking Harvest about it every minute is pure load.
+    let fresh = stale_non_terminal_runs(
+        &mut conn,
+        Utc::now().naive_utc() - ChronoDuration::hours(1),
+        100,
+    )
+    .await
+    .expect("the sweep query runs");
+    assert!(
+        !fresh.iter().any(|r| r.id == live.id),
+        "a recently-updated run is not stale"
+    );
+}
+
+#[tokio::test]
+async fn reconciling_a_terminated_execution_clears_the_stranded_row_once() {
+    let client = test_client();
+    let pool = client.state().pool().expect("transactional pool").clone();
+    let run = seed_run(&pool, 4, 300, 3).await;
+    let mut conn = pool.get().await.expect("checkout connection");
+
+    // Exactly the state a SIGKILLed worker leaves behind: frames written,
+    // `ticks_completed` advanced, status still non-terminal, no error.
+    simulate_batch_core(&mut conn, &batch_request(run.id, 0, 50))
+        .await
+        .expect("one batch lands");
+    let stranded = load_run(&mut conn, run.id).await;
+    assert_eq!(stranded.status, run_status::RUNNING);
+    assert!(stranded.error.is_none());
+
+    let snap = snapshot(
+        WorkflowResultState::Terminated,
+        Some("terminated by an operator"),
+        None,
+    );
+    let reconciled = reconcile_one(&mut conn, &stranded, EngineView::Snapshot(&snap))
+        .await
+        .expect("the reconciler runs")
+        .expect("a terminated execution closes its run out");
+
+    assert_eq!(reconciled.status, run_status::FAILED);
+    assert_eq!(
+        reconciled.ticks_completed, 50,
+        "the frames the run really wrote stay owned by the row"
+    );
+    let reason = reconciled.error.as_deref().expect("a recorded reason");
+    assert!(reason.contains("terminated by an operator"), "{reason}");
+
+    // Idempotent: the next sweep finds a terminal row and leaves it alone, so
+    // two replicas sweeping at once cannot fight over it.
+    let again = reconcile_one(&mut conn, &reconciled, EngineView::Snapshot(&snap))
+        .await
+        .expect("the reconciler runs");
+    assert!(
+        again.is_none(),
+        "an already-reconciled run must not be rewritten"
+    );
+    let final_row = load_run(&mut conn, run.id).await;
+    assert_eq!(final_row.error.as_deref(), Some(reason));
+}
+
+#[tokio::test]
+async fn the_reconciler_cannot_clobber_a_run_that_finished_normally() {
+    let client = test_client();
+    let pool = client.state().pool().expect("transactional pool").clone();
+    let run = seed_run(&pool, 4, 50, 4).await;
+    let mut conn = pool.get().await.expect("checkout connection");
+
+    let completed = finalize_run_core(
+        &mut conn,
+        &FinalizeRequest {
+            run_id: run.id,
+            status: run_status::COMPLETED.to_owned(),
+            ticks_completed: 50,
+            final_state_hash: "cafebabecafebabe".to_owned(),
+            error: None,
+        },
+    )
+    .await
+    .expect("the run completes");
+
+    // A sweep that raced the finalizer and asked Harvest a moment too early.
+    let stale_view = snapshot(WorkflowResultState::Failed, Some("stale answer"), None);
+    assert!(
+        reconcile_one(&mut conn, &completed, EngineView::Snapshot(&stale_view))
+            .await
+            .expect("the reconciler runs")
+            .is_none()
+    );
+
+    let row = load_run(&mut conn, run.id).await;
+    assert_eq!(row.status, run_status::COMPLETED);
+    assert_eq!(row.error, None);
+    assert_eq!(row.final_state_hash.as_deref(), Some("cafebabecafebabe"));
+}
+
+#[test]
+fn the_reconciler_is_registered_and_actually_mounted() {
+    // The failure this guards against is the one that made AC-27 vacuous and
+    // left `POST /runs/{id}/cancel` unreachable: correct code with no caller.
+    // A reconciler that is never scheduled reconciles nothing.
+    let info = boidboard::reconcile::__autumn_task_info_reconcile_stranded_runs();
+    assert_eq!(info.name, "reconcile_stranded_runs");
+    assert!(
+        matches!(info.coordination, autumn_web::task::TaskCoordination::Fleet),
+        "a repair sweep only needs to happen once per tick across the fleet"
+    );
+    match &info.schedule {
+        autumn_web::task::Schedule::FixedDelay(every) => assert!(
+            *every
+                < boidboard::reconcile::STALE_AFTER
+                    .to_std()
+                    .expect("a positive window"),
+            "the sweep must run more often than runs become stale, or a stranded \
+             run waits a whole extra window to be cleared"
+        ),
+        _ => panic!("expected a fixed-delay sweep"),
+    }
+
+    const LIB_SRC: &str = include_str!("../src/lib.rs");
+    assert!(
+        LIB_SRC.contains("tasks!") && LIB_SRC.contains("reconcile_stranded_runs"),
+        "the application must register the reconciler with `.tasks(tasks![…])`; \
+         an unscheduled `#[scheduled]` function is dead code"
+    );
 }

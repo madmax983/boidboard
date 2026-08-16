@@ -954,8 +954,8 @@ mod tests {
             "the added agent has no neighbours; the test would prove nothing"
         );
         assert!(
-            (0..built_for.len()).any(|i| neighbors_naive(&moved, &world, i, 12.0)
-                .contains(&intruder)),
+            (0..built_for.len())
+                .any(|i| neighbors_naive(&moved, &world, i, 12.0).contains(&intruder)),
             "no existing agent sees the added agent; the test would prove nothing"
         );
 

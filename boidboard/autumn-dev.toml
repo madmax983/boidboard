@@ -1,0 +1,25 @@
+# Boidboard — `dev` profile overrides.
+#
+# Loaded only when the active profile resolves to `dev`, which is the default
+# for a debug build and what `cargo test` runs under. Anything that is true of
+# a developer's laptop and false of a server belongs here rather than in
+# `autumn.toml`, because `autumn.toml` is merged over the `prod` smart defaults
+# and would override them.
+#
+# `tests/integration.rs` and the Harvest plugin's startup hook both resolve the
+# database through `AutumnConfig::load()`, which reads `autumn.toml` and then
+# this file — so this is where the dev database URL has to be for the app pool
+# and the worker's task queue to name the same database.
+
+[database]
+url = "postgres://boid:boid@127.0.0.1:5432/boidboard_dev"
+
+# Both of these match Autumn's own `dev` smart defaults; they are repeated here
+# so the developer-facing behaviour is visible in the file rather than implied
+# by a profile name.
+[log]
+level = "debug"
+format = "Pretty"
+
+[server]
+host = "127.0.0.1"

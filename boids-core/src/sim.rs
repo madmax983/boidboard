@@ -693,7 +693,11 @@ mod tests {
         // Sorted: directory order is not deterministic, and a failure message
         // that reorders itself between runs is a failure message nobody reads.
         files.sort();
-        assert!(files.len() >= 8, "found only {} kernel sources", files.len());
+        assert!(
+            files.len() >= 8,
+            "found only {} kernel sources",
+            files.len()
+        );
 
         let mut offenders = Vec::new();
         let mut exempt_hits = 0usize;
@@ -772,8 +776,18 @@ mod tests {
             // The shipped defaults: the scenario the example binary and the
             // cross-process test both use, so these two are directly
             // comparable with a hash produced by any other tool in the repo.
-            ("default/seed 0", SimParams::default(), 0, 0x18ae_2e5d_e42a_28e0),
-            ("default/seed 1", SimParams::default(), 1, 0xf8c6_9f07_14bb_7c6e),
+            (
+                "default/seed 0",
+                SimParams::default(),
+                0,
+                0x18ae_2e5d_e42a_28e0,
+            ),
+            (
+                "default/seed 1",
+                SimParams::default(),
+                1,
+                0xf8c6_9f07_14bb_7c6e,
+            ),
             // All five behaviours active with obstacles and a goal, so the
             // full summation order of `blend` is exercised.
             (
@@ -790,12 +804,7 @@ mod tests {
                 0xae13_5289_3fb2_f48e,
             ),
             // Laps the world, so the position wrap is part of what is pinned.
-            (
-                "cruising",
-                cruising(),
-                0x0BAD_1DEA,
-                0x7f10_1eb8_26ad_c0bd,
-            ),
+            ("cruising", cruising(), 0x0BAD_1DEA, 0x7f10_1eb8_26ad_c0bd),
         ]
     }
 
@@ -1010,7 +1019,11 @@ mod tests {
                     "{name}: orderings diverged at tick {tick}"
                 );
             }
-            assert_bit_identical(&by_id(&plain), &by_id(&mixed), &format!("{name}, 120 ticks"));
+            assert_bit_identical(
+                &by_id(&plain),
+                &by_id(&mixed),
+                &format!("{name}, 120 ticks"),
+            );
         }
     }
 
@@ -1740,8 +1753,12 @@ mod tests {
             goal,
             ..interacting()
         };
-        let a = run_batch(&start, &weighted(goals[1]), TICKS, 0).0.state_hash();
-        let b = run_batch(&start, &weighted(goals[3]), TICKS, 0).0.state_hash();
+        let a = run_batch(&start, &weighted(goals[1]), TICKS, 0)
+            .0
+            .state_hash();
+        let b = run_batch(&start, &weighted(goals[3]), TICKS, 0)
+            .0
+            .state_hash();
         assert_ne!(
             a, b,
             "with w_goal = 0.4 the goal position must still matter; \

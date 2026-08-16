@@ -297,7 +297,8 @@ mod tests {
             let hex = state_hash_hex(&a);
             assert_eq!(hex.len(), 16, "{hex} is not 16 chars");
             assert!(
-                hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+                hex.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
                 "{hex} is not lowercase hex"
             );
         }

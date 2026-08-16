@@ -1,13 +1,52 @@
+# Boidboard — profile-independent configuration.
+#
+# Everything here applies to EVERY profile, so nothing here may be a
+# development convenience. That is not a style rule, it is how the layering
+# works: Autumn merges its per-profile smart defaults FIRST and this file
+# SECOND, so any key set here silently overrides the `prod` defaults. This file
+# used to carry `database.url = …boidboard_dev`, `log.level = "debug"`,
+# `log.format = "Pretty"` and `server.host = "127.0.0.1"` — which meant a
+# production deploy would have connected to the developer's database, emitted
+# unparseable pretty logs, and bound loopback only. Those four now live in
+# `autumn-dev.toml`, which is loaded only on the `dev` profile.
+#
+# The security settings below are stated EXPLICITLY rather than inherited from
+# the active profile. Autumn's `prod` profile enables CSRF and its `dev` profile
+# disables it, but a *custom* profile name (`staging`, `qa`, …) gets no smart
+# defaults at all — so `AUTUMN_PROFILE=staging` would have shipped with CSRF off
+# and `Access-Control-Allow-Origin: *`. Naming them here makes the posture a
+# property of the application instead of a property of a string.
+#
+# Deployment note: `database.auto_migrate_in_production` defaults to `false`, so
+# a `prod` boot does NOT apply pending migrations. Run `autumn migrate` against
+# the target database before starting the server, or the first request will hit
+# tables that do not exist.
+
 [server]
-host = "127.0.0.1"
 port = 3000
-
-[database]
-url = "postgres://boid:boid@127.0.0.1:5432/boidboard_dev"
-
-[log]
-level = "debug"
-format = "Pretty"
 
 [health]
 path = "/health"
+
+# No cross-origin caller has any business here: the whole UI is server-rendered
+# HTML on the same origin, and there is no JSON API for a browser to call. Empty
+# means the CORS middleware is not applied at all — no `Access-Control-*` header
+# is emitted on any response.
+[cors]
+allowed_origins = []
+
+# Every mutating request (`POST /runs`, `POST /runs/{id}/cancel`) must carry the
+# `_csrf` token the form embeds. Without this a cross-origin `POST /runs` from
+# an attacker's page succeeds, because the app has no other same-origin check.
+[security.csrf]
+enabled = true
+
+# A cheap ceiling on request volume per client. `RateLimitConfig::enabled`
+# defaults to `false`, so this has to be asked for. The numbers are generous for
+# what the app actually does — a run-detail page plus a progress fragment every
+# two seconds per open tab is well under 1 rps — while still bounding a script
+# that decides to submit runs in a loop.
+[security.rate_limit]
+enabled = true
+requests_per_second = 20.0
+burst = 60

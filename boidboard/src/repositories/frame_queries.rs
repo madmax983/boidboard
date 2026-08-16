@@ -75,12 +75,32 @@ pub async fn max_tick(conn: &mut AsyncPgConnection, run_id: i64) -> AutumnResult
 
 /// Frames for a run in ascending tick order.
 ///
-/// With `limit = Some(n)` the result is subsampled to **at most** `n` evenly
-/// spaced frames, always including the first and last so a trajectory ribbon
-/// still spans the whole run. That is the SVG rendering budget: a 10 000-tick
-/// run must not put 10 000 marks on a page.
+/// With `limit = Some(n)` the result is **at most** `n` evenly spaced frames,
+/// always including the first and last so a trajectory ribbon still spans the
+/// whole run. That is the SVG rendering budget: a 10 000-tick run must not put
+/// 10 000 marks on a page.
 ///
 /// `limit = None` returns every frame; `limit = Some(0)` returns nothing.
+///
+/// # The budget is a *query* budget
+///
+/// This used to `.load()` every frame for the run and thin the result in Rust
+/// afterwards, which made the budget purely cosmetic: a 301-frame run moved
+/// 2.66 MB across the wire to render a 57 KB page, linearly and without bound,
+/// and a long run turned one `GET /runs/{id}` into a multi-gigabyte allocation.
+///
+/// Now the sampling happens **before** the rows exist. Two round trips:
+/// [`tick_bounds`] asks Postgres for `min(tick)`/`max(tick)` (index-only, one
+/// row), [`sampled_ticks`] computes the ≤ `n` ticks the page actually wants,
+/// and the fetch is `tick = ANY($ticks)` with a matching `LIMIT`. The database
+/// therefore cannot return more than `n` rows however long the run is — the
+/// bound is structural, not a filter applied to something already too large.
+///
+/// [`subsample`] still runs on the result. It is a no-op on the normal path
+/// (the query already returned at most `n` rows) and exists for the abnormal
+/// one: a run with gaps in its tick sequence can match fewer ticks than the
+/// slots asked for, and the invariant "at most `n`, endpoints included" should
+/// hold for a damaged run too.
 ///
 /// # Errors
 /// Returns an error if the query fails.
@@ -89,17 +109,101 @@ pub async fn frames_for_run(
     run_id: i64,
     limit: Option<usize>,
 ) -> AutumnResult<Vec<Frame>> {
-    let all: Vec<Frame> = frames::table
+    let Some(budget) = limit else {
+        let all: Vec<Frame> = frames::table
+            .filter(frames::run_id.eq(run_id))
+            .order(frames::tick.asc())
+            .select(Frame::as_select())
+            .load(conn)
+            .await?;
+        return Ok(all);
+    };
+
+    if budget == 0 {
+        return Ok(Vec::new());
+    }
+
+    let Some((lowest, highest)) = tick_bounds(conn, run_id).await? else {
+        return Ok(Vec::new());
+    };
+
+    let wanted = sampled_ticks(lowest, highest, budget);
+    let rows: Vec<Frame> = frames::table
         .filter(frames::run_id.eq(run_id))
+        .filter(frames::tick.eq_any(&wanted))
         .order(frames::tick.asc())
+        // Belt as well as braces: `wanted` is already at most `budget` long, so
+        // this can never truncate a correct result. It is here so the bound
+        // survives a future edit to the tick selection.
+        .limit(i64::try_from(budget).unwrap_or(i64::MAX))
         .select(Frame::as_select())
         .load(conn)
         .await?;
 
-    Ok(match limit {
-        None => all,
-        Some(n) => subsample(all, n),
+    Ok(subsample(rows, budget))
+}
+
+/// The lowest and highest stored tick for a run, or `None` when it has none.
+///
+/// One row out of Postgres regardless of how many frames the run has — this is
+/// what makes the detail page's cost independent of run length.
+///
+/// # Errors
+/// Returns an error if the query fails.
+pub async fn tick_bounds(
+    conn: &mut AsyncPgConnection,
+    run_id: i64,
+) -> AutumnResult<Option<(i32, i32)>> {
+    let bounds: (Option<i32>, Option<i32>) = frames::table
+        .filter(frames::run_id.eq(run_id))
+        .select((
+            diesel::dsl::min(frames::tick),
+            diesel::dsl::max(frames::tick),
+        ))
+        .first(conn)
+        .await?;
+
+    Ok(match bounds {
+        (Some(lowest), Some(highest)) => Some((lowest, highest)),
+        _ => None,
     })
+}
+
+/// The ticks a budgeted query asks the database for: at most `budget` values,
+/// evenly spread across `lowest..=highest`, both endpoints included.
+///
+/// This is the whole reason [`frames_for_run`]'s budget is a *query* budget —
+/// the returned list is what goes into `tick = ANY(...)`, so its length is the
+/// hard ceiling on how many rows Postgres can produce. Ascending and free of
+/// duplicates, so it also doubles as the expected tick sequence in tests.
+///
+/// A run of one tick, or a budget of one, yields just the first tick; a budget
+/// of zero yields nothing.
+#[must_use]
+pub fn sampled_ticks(lowest: i32, highest: i32, budget: usize) -> Vec<i32> {
+    if budget == 0 {
+        return Vec::new();
+    }
+    if budget == 1 || highest <= lowest {
+        return vec![lowest];
+    }
+
+    let span = i64::from(highest) - i64::from(lowest);
+    // Asking for more slots than there are ticks would build a list longer than
+    // the answer can be; one slot per tick is the most that can ever help.
+    let slots = i64::try_from(budget - 1).unwrap_or(span).min(span);
+
+    // Slot s maps to lowest + round(s * span / slots), pinning slot 0 to the
+    // first tick and slot `slots` to the last. Monotonic, so `dedup` removes
+    // every repeat a coarse span produces.
+    let mut ticks: Vec<i32> = (0..=slots)
+        .map(|s| {
+            let offset = (2 * s * span + slots) / (2 * slots);
+            i32::try_from(i64::from(lowest) + offset).unwrap_or(highest)
+        })
+        .collect();
+    ticks.dedup();
+    ticks
 }
 
 /// Take at most `n` evenly spaced items, always including the first and last.
@@ -163,7 +267,59 @@ pub async fn tick_gaps(conn: &mut AsyncPgConnection, run_id: i64) -> AutumnResul
 
 #[cfg(test)]
 mod tests {
-    use super::subsample;
+    use super::{sampled_ticks, subsample};
+
+    // ── the query budget (H2) ──
+    //
+    // `frames_for_run` asks Postgres for `tick = ANY(sampled_ticks(..))` with a
+    // matching `LIMIT`, so the length of this list *is* the ceiling on how many
+    // rows the database can return. Bounding it here bounds the query.
+
+    #[test]
+    fn sampled_ticks_never_exceeds_the_budget_however_long_the_run() {
+        for span in [0, 1, 5, 300, 10_000, 100_000, i32::MAX - 1] {
+            let ticks = sampled_ticks(0, span, 120);
+            assert!(
+                ticks.len() <= 120,
+                "a {span}-tick run must not ask the database for {} rows on a \
+                 budget of 120",
+                ticks.len()
+            );
+            assert_eq!(ticks[0], 0, "the first tick is always asked for");
+            assert_eq!(
+                *ticks.last().expect("non-empty"),
+                span,
+                "the last tick is always asked for, so a ribbon spans the run"
+            );
+            assert!(
+                ticks.windows(2).all(|w| w[0] < w[1]),
+                "ascending and duplicate-free, or the IN list wastes slots"
+            );
+        }
+    }
+
+    #[test]
+    fn sampled_ticks_matches_the_positions_index_subsampling_would_have_chosen() {
+        // The pre-fix code loaded every frame and kept indices 0, 25, 50, 75,
+        // 100. Frames are contiguous by construction, so tick == index + first,
+        // and the two must agree — otherwise this "optimisation" would quietly
+        // change which frames the page draws.
+        assert_eq!(sampled_ticks(0, 100, 5), vec![0, 25, 50, 75, 100]);
+        assert_eq!(sampled_ticks(0, 100, 3), vec![0, 50, 100]);
+        assert_eq!(sampled_ticks(0, 100, 2), vec![0, 100]);
+        // A run whose frames start late is sampled across what it has, not
+        // across the ticks it never stored.
+        assert_eq!(sampled_ticks(40, 140, 5), vec![40, 65, 90, 115, 140]);
+    }
+
+    #[test]
+    fn sampled_ticks_handles_degenerate_budgets_and_spans() {
+        assert!(sampled_ticks(0, 100, 0).is_empty());
+        assert_eq!(sampled_ticks(0, 100, 1), vec![0]);
+        assert_eq!(sampled_ticks(7, 7, 120), vec![7]);
+        // A budget wider than the run asks for every tick and no more.
+        assert_eq!(sampled_ticks(0, 4, 1_000), vec![0, 1, 2, 3, 4]);
+    }
 
     #[test]
     fn subsample_keeps_endpoints_and_spreads_the_rest() {

@@ -512,7 +512,10 @@ mod tests {
         let inside = f64::from_bits(15.0_f64.to_bits() - 1);
         let just_inside = [at(0, Vec2::new(10.0, 10.0)), at(1, Vec2::new(inside, 10.0))];
         let f = separation(&just_inside, &w, 0, &[1], 5.0);
-        assert!(f.length() > 0.0, "one ULP inside the radius must repel: {f:?}");
+        assert!(
+            f.length() > 0.0,
+            "one ULP inside the radius must repel: {f:?}"
+        );
         assert!(f.x < 0.0, "and must still push away: {f:?}");
 
         // The other half of the documented asymmetry: at that same distance,

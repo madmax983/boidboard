@@ -34,8 +34,8 @@ use chrono::SecondsFormat;
 // Deliberately not `diesel::prelude::*`: it pulls in the *synchronous*
 // `RunQueryDsl`, which collides with `diesel_async`'s on every `.first`/
 // `.execute` call.
-use diesel::{ExpressionMethods as _, QueryDsl as _, SelectableHelper as _};
 use diesel::result::OptionalExtension as _;
+use diesel::{ExpressionMethods as _, QueryDsl as _, SelectableHelper as _};
 use diesel_async::{AsyncPgConnection, RunQueryDsl as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -264,8 +264,27 @@ pub async fn simulation_workflow(
             ));
         }
 
-        let cursor: BatchCursor = serde_json::from_value(
-            ctx.execute_activity_raw(
+        // A batch that exhausts its retries must close the run out before the
+        // workflow gives up. Without this the run row is left at `running`
+        // forever: nothing else in the application writes `status::FAILED`, so
+        // every open tab polls `/runs/{id}/progress` every two seconds for a run
+        // that will never move again, and the operator has no way to clear it.
+        //
+        // # Why this is replay-safe where the engine-cancel path above is not
+        //
+        // The two look symmetrical and are not. An **`ActivityFailed` event is
+        // consumed by the replay matcher** — it is the recorded outcome of a
+        // command the workflow itself issued — so the next command after it,
+        // this `finalize_run`, lands on a fresh position in history and replays
+        // identically forever. A `WorkflowCancelled` event has no command
+        // counterpart and is *not* consumed, so any command issued past it lands
+        // on that event and is reported as non-determinism (see the comment at
+        // the top of this loop). **Do not unify the two paths.**
+        //
+        // `finalize_run_core` is terminal-safe, so this races nothing: a run
+        // already finalized as `cancelled` or `completed` is returned unchanged.
+        let raw = match ctx
+            .execute_activity_raw(
                 "simulate_batch",
                 serde_json::json!({
                     "run_id": input.run_id,
@@ -276,8 +295,30 @@ pub async fn simulation_workflow(
                 }),
                 SIMULATION_QUEUE,
             )
-            .await?,
-        )?;
+            .await
+        {
+            Ok(value) => value,
+            Err(e) => {
+                // `next_tick` and `state_hash` still hold the last checkpoint the
+                // run genuinely reached, so the frames its completed batches
+                // wrote stay owned by the row rather than being disclaimed.
+                ctx.execute_activity_raw(
+                    "finalize_run",
+                    serde_json::json!({
+                        "run_id": input.run_id,
+                        "status": status::FAILED,
+                        "ticks_completed": next_tick,
+                        "final_state_hash": state_hash,
+                        "error": e.to_string(),
+                    }),
+                    SIMULATION_QUEUE,
+                )
+                .await?;
+                return Err(e);
+            }
+        };
+
+        let cursor: BatchCursor = serde_json::from_value(raw)?;
 
         // A cursor naming another run means a message was misrouted. Applying it
         // would advance this run using a different run's checkpoint — silently,
@@ -642,16 +683,18 @@ pub async fn finalize_run_core(
     let final_state_hash =
         (!request.final_state_hash.is_empty()).then(|| request.final_state_hash.clone());
 
-    Ok(diesel::update(runs::table.filter(runs::id.eq(request.run_id)))
-        .set((
-            runs::status.eq(&request.status),
-            runs::ticks_completed.eq(completed),
-            runs::final_state_hash.eq(final_state_hash),
-            runs::error.eq(request.error.clone()),
-        ))
-        .returning(Run::as_returning())
-        .get_result(conn)
-        .await?)
+    Ok(
+        diesel::update(runs::table.filter(runs::id.eq(request.run_id)))
+            .set((
+                runs::status.eq(&request.status),
+                runs::ticks_completed.eq(completed),
+                runs::final_state_hash.eq(final_state_hash),
+                runs::error.eq(request.error.clone()),
+            ))
+            .returning(Run::as_returning())
+            .get_result(conn)
+            .await?,
+    )
 }
 
 /// Record one operator intervention against a run (**AC-34**).
@@ -702,12 +745,75 @@ pub async fn record_signal_core(
     Ok(inserted.id)
 }
 
+// ═══════════════════════ Failure classification ═══════════════════════
+
+/// Stable, low-cardinality names for the ways an activity here can fail.
+///
+/// These are **classes, not messages**. Harvest stamps `error_type` onto the
+/// `ActivityFailed` event, uses it as the `error.type` dimension on
+/// `harvest.activity.duration` / `harvest.activity.failed`, and matches
+/// [`RetryPolicy::non_retryable_errors`] against it. A hand-formatted string
+/// would drift every time a message is reworded, silently changing both a
+/// dashboard and a retry policy — which is exactly what happened when every
+/// failure here was reported as `Database`.
+pub mod error_type {
+    /// The request can never succeed as sent: parameters that fail validation,
+    /// a checkpoint that does not exist, a tick out of range, a non-terminal
+    /// status handed to the finalizer. Permanent, so retries are skipped.
+    pub const INVALID_CONFIG: &str = "InvalidConfig";
+    /// Everything else these activities can hit: a pool timeout, a dropped
+    /// connection, a transient Postgres error. Transient, so the activity's own
+    /// retry policy applies.
+    pub const DATABASE: &str = "Database";
+    /// The worker was built with no application database pool. Permanent within
+    /// the process: a worker that started without a pool will not grow one.
+    pub const NO_DATABASE_POOL: &str = "NoDatabasePool";
+    /// The activity input did not deserialize, or its output did not serialize.
+    /// Permanent: the same bytes fail the same way on every attempt.
+    pub const INVALID_INPUT: &str = "InvalidInput";
+}
+
+/// Turn a `_core` failure into Harvest's typed failure surface.
+///
+/// **The `_core`/shell split is the classification point.** Every core returns
+/// [`AutumnError`], which already carries an HTTP status, and the cores use that
+/// status deliberately: `unprocessable_msg` (422) is how they say "this request
+/// is wrong", and everything else is a database fault. So the mapping is one
+/// line of policy — **422 is permanent, anything else is transient** — rather
+/// than a growing list of string matches.
+///
+/// Permanent failures come back `non_retryable`, which makes the worker skip the
+/// remaining attempts on the spot. That matters: `simulate_batch` is retried
+/// three times with exponential backoff, so an invalid config used to take four
+/// worker slots and several seconds of backoff to report a verdict that was
+/// already final on the first attempt.
+#[must_use]
+pub fn classify_activity_error(error: &AutumnError) -> ActivityFailure {
+    let message = error.to_string();
+    if error.status() == autumn_web::reexports::http::StatusCode::UNPROCESSABLE_ENTITY {
+        ActivityFailure::non_retryable(error_type::INVALID_CONFIG, message)
+    } else {
+        ActivityFailure::retryable(error_type::DATABASE, message)
+    }
+}
+
+/// A malformed activity payload: permanent, because the same bytes fail
+/// identically on every attempt.
+fn invalid_payload(what: &str, error: &serde_json::Error) -> ActivityFailure {
+    ActivityFailure::non_retryable(error_type::INVALID_INPUT, format!("{what}: {error}"))
+}
+
 // ═══════════════════════ Activities ═══════════════════════
 //
 // Each of these is a shell: find a connection, delegate to the matching `_core`
 // function, serialize the answer. Nothing here has behaviour of its own, which
 // is the point — behaviour that a worker has to be running to reach is
 // behaviour that cannot be tested.
+//
+// Each returns `Result<Value, ActivityFailure>` rather than `HarvestResult<_>`:
+// the `#[activity]` macro recognises that return type syntactically and routes
+// the error through the typed encoding, so `error_type` and `non_retryable`
+// survive into workflow history and into metrics.
 
 /// Check out a connection to the **application** database inside an activity.
 ///
@@ -717,17 +823,23 @@ pub async fn record_signal_core(
 /// the business database rather than Harvest's system storage, which is exactly
 /// what these activities want: they touch `runs`, `frames` and `run_signals`,
 /// never the queue tables.
-async fn app_conn(ctx: &ActivityContext) -> HarvestResult<PooledConnection> {
+async fn app_conn(ctx: &ActivityContext) -> Result<PooledConnection, ActivityFailure> {
     let pool = ctx.state::<AppDbPool>().ok_or_else(|| {
-        HarvestError::Config(
+        // Permanent *within this process*: a worker that booted without a pool
+        // will not acquire one between retries, so backing off five times only
+        // delays the same answer.
+        ActivityFailure::non_retryable(
+            error_type::NO_DATABASE_POOL,
             "no AppDbPool in activity state — the Harvest plugin was built without an \
-             application database pool"
-                .to_owned(),
+             application database pool",
         )
     })?;
-    pool.get()
-        .await
-        .map_err(|e| HarvestError::Database(format!("checking out a connection: {e}")))
+    pool.get().await.map_err(|e| {
+        ActivityFailure::retryable(
+            error_type::DATABASE,
+            format!("checking out a connection: {e}"),
+        )
+    })
 }
 
 /// Advance one run by one checkpointed batch (**AC-29**, **AC-32**).
@@ -745,13 +857,14 @@ async fn app_conn(ctx: &ActivityContext) -> HarvestResult<PooledConnection> {
     start_to_close = "300s",
     retry = RetryPolicy::exponential(3, std::time::Duration::from_secs(1))
 )]
-pub async fn simulate_batch(ctx: &ActivityContext, input: Value) -> HarvestResult<Value> {
-    let request: BatchRequest = serde_json::from_value(input)?;
+pub async fn simulate_batch(ctx: &ActivityContext, input: Value) -> Result<Value, ActivityFailure> {
+    let request: BatchRequest =
+        serde_json::from_value(input).map_err(|e| invalid_payload("simulate_batch input", &e))?;
     let mut conn = app_conn(ctx).await?;
     let cursor = simulate_batch_core(&mut conn, &request)
         .await
-        .map_err(|e| HarvestError::Database(e.to_string()))?;
-    Ok(serde_json::to_value(cursor)?)
+        .map_err(|e| classify_activity_error(&e))?;
+    serde_json::to_value(cursor).map_err(|e| invalid_payload("simulate_batch cursor", &e))
 }
 
 /// Close a run out in its terminal state (**AC-33**, **AC-35**, **AC-38**).
@@ -764,12 +877,13 @@ pub async fn simulate_batch(ctx: &ActivityContext, input: Value) -> HarvestResul
     start_to_close = "60s",
     retry = RetryPolicy::exponential(5, std::time::Duration::from_secs(1))
 )]
-pub async fn finalize_run(ctx: &ActivityContext, input: Value) -> HarvestResult<Value> {
-    let request: FinalizeRequest = serde_json::from_value(input)?;
+pub async fn finalize_run(ctx: &ActivityContext, input: Value) -> Result<Value, ActivityFailure> {
+    let request: FinalizeRequest =
+        serde_json::from_value(input).map_err(|e| invalid_payload("finalize_run input", &e))?;
     let mut conn = app_conn(ctx).await?;
     let run = finalize_run_core(&mut conn, &request)
         .await
-        .map_err(|e| HarvestError::Database(e.to_string()))?;
+        .map_err(|e| classify_activity_error(&e))?;
     Ok(serde_json::json!({
         "run_id": run.id,
         "status": run.status,
@@ -788,11 +902,12 @@ pub async fn finalize_run(ctx: &ActivityContext, input: Value) -> HarvestResult<
     start_to_close = "30s",
     retry = RetryPolicy::exponential(5, std::time::Duration::from_secs(1))
 )]
-pub async fn record_signal(ctx: &ActivityContext, input: Value) -> HarvestResult<Value> {
-    let record: SignalRecord = serde_json::from_value(input)?;
+pub async fn record_signal(ctx: &ActivityContext, input: Value) -> Result<Value, ActivityFailure> {
+    let record: SignalRecord =
+        serde_json::from_value(input).map_err(|e| invalid_payload("record_signal input", &e))?;
     let mut conn = app_conn(ctx).await?;
     let signal_id = record_signal_core(&mut conn, &record)
         .await
-        .map_err(|e| HarvestError::Database(e.to_string()))?;
+        .map_err(|e| classify_activity_error(&e))?;
     Ok(serde_json::json!({ "run_signal_id": signal_id }))
 }

@@ -45,10 +45,7 @@ use crate::models::{
     NewRun, NewScenario, Run, Scenario, UpdateRun, canonical_config_hash, run::status,
 };
 use crate::presets;
-use crate::repositories::{
-    PgRunRepository, PgScenarioRepository, RunRepository as _, ScenarioRepository as _,
-    frames_for_run,
-};
+use crate::repositories::{PgRunRepository, RunRepository as _, frames_for_run};
 use crate::schema::{frames, runs, scenarios};
 use crate::views;
 use crate::workflow::{CANCEL_SIGNAL, SIMULATION_QUEUE, SimulationInput, simulation_workflow_info};
@@ -75,6 +72,13 @@ const RUN_LIST_LIMIT: i64 = 200;
 /// 10 000-tick run of 160 agents would otherwise deserialize 1.6 million agent
 /// records to draw one page. The *rendering* budgets in
 /// [`views::TrajectoryOpts`] then thin this further for the ribbons.
+///
+/// The claim in the previous sentence was, for a while, false: the query loaded
+/// every frame and the budget was applied in Rust afterwards, so a 301-frame run
+/// moved 2.66 MB to render a 57 KB page. It is true now — the budget is pushed
+/// into the `WHERE` clause as an explicit tick list, so Postgres never builds
+/// more rows than this. See
+/// [`frames_for_run`](crate::repositories::frames_for_run).
 const DETAIL_FRAME_BUDGET: usize = 120;
 
 // ────────────────────────────── AC-41: run list ──────────────────────────────
@@ -123,8 +127,12 @@ pub async fn run_list(mut db: Db) -> AutumnResult<Markup> {
 /// The new-run form (AC-42). No database: the form is presets and nothing else.
 #[get("/runs/new")]
 #[public]
-pub async fn new_run_form() -> Markup {
-    views::layout("New run", views::new_run_form(&presets::all()))
+pub async fn new_run_form(
+    csrf: Option<autumn_web::security::CsrfToken>,
+    csrf_field: Option<autumn_web::security::CsrfFormField>,
+) -> Markup {
+    let csrf = views::Csrf::from_request_parts(csrf.as_ref(), csrf_field.as_ref());
+    views::layout("New run", views::new_run_form(&presets::all(), &csrf))
 }
 
 /// Submitted new-run form.
@@ -145,23 +153,87 @@ pub struct CreateRunForm {
     pub max_ticks: Option<String>,
 }
 
+/// The largest tick budget a run may be created with.
+///
+/// A tick budget is a promise of work: at the measured ~40 ticks/s and ~9 KB of
+/// `agents` JSONB per frame, the `i32` maximum a form could previously submit
+/// (`2147483647`) is about 1.7 years of worker time and 19 TB of frame rows —
+/// bookable by one anonymous POST, because the form's `min="1"` is client-side
+/// only and nothing on the server ever looked.
+///
+/// 100 000 is chosen against the *workflow*, not a round number: at
+/// [`BATCH_TICKS`] = 50 that is 2 000 batches, and a Harvest execution records
+/// roughly three history events per batch, so a full-budget run lands near
+/// 6 000 events — comfortably under the 10 000-event `continue_as_new`
+/// threshold at which a workflow would have to rotate its history. A run at the
+/// ceiling therefore still completes as a single execution, which is what keeps
+/// the resume cursor and the frame sequence simple. Raising this past ~3 300
+/// batches means teaching `simulation_workflow` to rotate.
+pub const MAX_TICKS_CEILING: i32 = 100_000;
+
+/// How many non-terminal runs may exist before new submissions are refused.
+///
+/// [`MAX_TICKS_CEILING`] bounds one run; this bounds the *fleet*. Without it a
+/// script can hold the ceiling in each of unboundedly many runs, which costs the
+/// same worker-years spread across more rows. The limit is deliberately loose —
+/// a bench is meant to be used, and every legitimate session sits far below it —
+/// and it counts non-terminal runs rather than recent ones, so a run that wedges
+/// consumes a slot until it is finalized. That is the intended pressure: a
+/// wedged run is a bug to fix, not a slot to forget.
+pub const MAX_ACTIVE_RUNS: i64 = 24;
+
 impl CreateRunForm {
     /// Seed to run with, falling back to the form's own offered default.
-    fn seed_or_default(&self) -> i64 {
-        self.seed
-            .as_deref()
-            .and_then(|s| s.trim().parse::<i64>().ok())
-            .unwrap_or(views::DEFAULT_SEED)
+    ///
+    /// An omitted or empty field is the default — a browser sends an emptied
+    /// number input as `""`, and the form advertises the fallback. A field with
+    /// *content* that is not a seed is a mistake, and is reported: silently
+    /// substituting `1` would record a run whose provenance says it ran a seed
+    /// the user never asked for.
+    ///
+    /// # Errors
+    /// Returns `422` when the field is present, non-empty and unreadable.
+    fn seed_or_default(&self) -> AutumnResult<i64> {
+        let Some(raw) = Self::non_empty(self.seed.as_deref()) else {
+            return Ok(views::DEFAULT_SEED);
+        };
+        raw.parse::<i64>().map_err(|_| {
+            AutumnError::unprocessable_msg(format!("`seed` must be a whole number, got `{raw}`"))
+        })
     }
 
-    /// Tick budget to run with. Never less than one tick: a zero-tick run
-    /// would be created already finished and would produce no frames at all.
-    fn max_ticks_or_default(&self) -> i32 {
-        self.max_ticks
-            .as_deref()
-            .and_then(|s| s.trim().parse::<i32>().ok())
-            .unwrap_or(views::DEFAULT_MAX_TICKS)
-            .max(1)
+    /// Tick budget to run with, within `1..=`[`MAX_TICKS_CEILING`].
+    ///
+    /// Out-of-range input is **refused**, not clamped. Clamping would run a
+    /// different experiment from the one that was asked for and report success,
+    /// which is the same category of quiet lie as substituting a default preset
+    /// for an unknown slug — and this page's whole claim is that a run is a
+    /// faithful record of what was requested.
+    ///
+    /// # Errors
+    /// Returns `422` when the field is present, non-empty and either unreadable
+    /// or outside the legal range.
+    fn max_ticks_or_default(&self) -> AutumnResult<i32> {
+        let Some(raw) = Self::non_empty(self.max_ticks.as_deref()) else {
+            return Ok(views::DEFAULT_MAX_TICKS);
+        };
+        let parsed = raw.parse::<i32>().map_err(|_| {
+            AutumnError::unprocessable_msg(format!(
+                "`max_ticks` must be a whole number between 1 and {MAX_TICKS_CEILING}, \
+                 got `{raw}`"
+            ))
+        })?;
+        if !(1..=MAX_TICKS_CEILING).contains(&parsed) {
+            return Err(AutumnError::unprocessable_msg(format!(
+                "`max_ticks` must be between 1 and {MAX_TICKS_CEILING}, got {parsed}"
+            )));
+        }
+        Ok(parsed)
+    }
+
+    /// The trimmed field value, or `None` when it was omitted or blank.
+    fn non_empty(field: Option<&str>) -> Option<&str> {
+        field.map(str::trim).filter(|s| !s.is_empty())
     }
 }
 
@@ -346,6 +418,95 @@ async fn dispatch_run(state: &AppState, run: &Run) -> AutumnResult<Option<String
     Ok(Some(started.exec_id.to_string()))
 }
 
+/// Refuse a submission once [`MAX_ACTIVE_RUNS`] runs are already in flight.
+///
+/// `503`, not `400`: the request is well-formed and will be fine later, which is
+/// exactly what a saturated bench means. (`429` would be the ideal code; the
+/// error type does not carry one, and inventing a bare response here would cost
+/// the uniform error rendering every other refusal in this file gets.)
+///
+/// An app with no database pool — the state `tests/web.rs` boots for pure
+/// rendering assertions — has no runs to count, so there is nothing to refuse.
+async fn refuse_when_bench_is_full(state: &AppState) -> AutumnResult<()> {
+    let Some(pool) = state.pool() else {
+        return Ok(());
+    };
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|e| AutumnError::service_unavailable_msg(format!("run capacity check: {e}")))?;
+
+    let active = active_run_count(&mut conn).await?;
+    if active >= MAX_ACTIVE_RUNS {
+        return Err(AutumnError::service_unavailable_msg(format!(
+            "the bench is full: {active} runs are already queued or running and the \
+             limit is {MAX_ACTIVE_RUNS}. Wait for one to finish, or cancel one from \
+             its page."
+        )));
+    }
+    Ok(())
+}
+
+/// How many runs are queued or running.
+///
+/// The set of non-terminal statuses is *derived* from
+/// [`status::is_terminal`](crate::models::run::status::is_terminal) rather than
+/// listed again, so a status added later is counted without anyone remembering
+/// to come back here.
+async fn active_run_count(conn: &mut AsyncPgConnection) -> AutumnResult<i64> {
+    let active: Vec<&str> = status::ALL
+        .into_iter()
+        .filter(|s| !status::is_terminal(s))
+        .collect();
+    let count = runs::table
+        .filter(runs::status.eq_any(active))
+        .count()
+        .get_result(conn)
+        .await?;
+    Ok(count)
+}
+
+/// The scenario with `new.config_hash`, creating it if no one has yet.
+///
+/// One statement, not two. Read-then-insert is a time-of-check/time-of-use
+/// race: two submissions of the same preset that arrive together both find no
+/// row and both insert one, and the bench ends up with two scenarios that are
+/// the same scenario — which quietly breaks "have I run this exact parameter set
+/// before?", the only question `config_hash` exists to answer.
+///
+/// `ON CONFLICT (config_hash) DO NOTHING` makes the loser of that race a no-op
+/// rather than a duplicate or an error, and the re-read then returns whichever
+/// row won. The conflict target is backed by the UNIQUE index added in
+/// `20260816000006_scenarios_config_hash_unique`; Postgres rejects the clause
+/// without it, so the invariant cannot silently regress to a plain index.
+///
+/// The re-read is a separate statement rather than a `RETURNING` clause because
+/// `DO NOTHING` returns no row for the loser — which is exactly the case that
+/// needs an answer.
+async fn find_or_create_scenario(state: &AppState, new: &NewScenario) -> AutumnResult<Scenario> {
+    let pool = state
+        .pool()
+        .ok_or_else(|| AutumnError::service_unavailable_msg("no database pool is configured"))?;
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|e| AutumnError::service_unavailable_msg(format!("scenario lookup: {e}")))?;
+
+    diesel::insert_into(scenarios::table)
+        .values(new)
+        .on_conflict(scenarios::config_hash)
+        .do_nothing()
+        .execute(&mut conn)
+        .await?;
+
+    let scenario = scenarios::table
+        .filter(scenarios::config_hash.eq(&new.config_hash))
+        .select(Scenario::as_select())
+        .first(&mut conn)
+        .await?;
+    Ok(scenario)
+}
+
 /// Create a scenario (or reuse the one with the same canonical config hash),
 /// create a queued run, **start its durable workflow**, then redirect to the
 /// run's page (AC-42).
@@ -366,40 +527,38 @@ async fn dispatch_run(state: &AppState, run: &Run) -> AutumnResult<Option<String
 #[public]
 pub async fn create_run(
     State(state): State<AppState>,
-    scenario_repo: PgScenarioRepository,
     run_repo: PgRunRepository,
     Form(form): Form<CreateRunForm>,
 ) -> AutumnResult<Redirect> {
     let preset = presets::by_slug(&form.preset)
         .ok_or_else(|| AutumnError::bad_request_msg(format!("unknown preset `{}`", form.preset)))?;
+    // Validate the whole submission before writing anything: a run refused
+    // halfway leaves a scenario row behind for a run that never existed.
+    let seed = form.seed_or_default()?;
+    let max_ticks = form.max_ticks_or_default()?;
+    refuse_when_bench_is_full(&state).await?;
 
     let config = serde_json::to_value(&preset.params).map_err(|e| {
         AutumnError::internal_server_error_msg(format!("preset config is not serializable: {e}"))
     })?;
     let config_hash = canonical_config_hash(&config);
 
-    let existing = scenario_repo
-        .find_by_config_hash(config_hash.clone())
-        .await?;
-    let scenario: Scenario = match existing.into_iter().next() {
-        Some(s) => s,
-        None => {
-            scenario_repo
-                .save(&NewScenario {
-                    name: preset.name.to_owned(),
-                    config: config.clone(),
-                    config_hash: config_hash.clone(),
-                })
-                .await?
-        }
-    };
+    let scenario = find_or_create_scenario(
+        &state,
+        &NewScenario {
+            name: preset.name.to_owned(),
+            config: config.clone(),
+            config_hash: config_hash.clone(),
+        },
+    )
+    .await?;
 
     let run = run_repo
         .save(&NewRun {
             scenario_id: scenario.id,
-            seed: form.seed_or_default(),
+            seed,
             status: status::QUEUED.to_owned(),
-            max_ticks: form.max_ticks_or_default(),
+            max_ticks,
             ticks_completed: 0,
             config_snapshot: config,
             config_hash,
@@ -490,7 +649,12 @@ pub async fn cancel_run(
 /// (AC-43, AC-44, AC-45, AC-47).
 #[get("/runs/{id}")]
 #[public]
-pub async fn run_detail(mut db: Db, Path(id): Path<i64>) -> AutumnResult<Markup> {
+pub async fn run_detail(
+    mut db: Db,
+    Path(id): Path<i64>,
+    csrf: Option<autumn_web::security::CsrfToken>,
+    csrf_field: Option<autumn_web::security::CsrfFormField>,
+) -> AutumnResult<Markup> {
     let run = load_run(&mut db, id).await?;
     let scenario_name = scenario_name_of(&mut db, run.scenario_id).await?;
     let (world, obstacles) = world_of(&run);
@@ -511,6 +675,8 @@ pub async fn run_detail(mut db: Db, Path(id): Path<i64>) -> AutumnResult<Markup>
 
     let title = format!("{scenario_name} · run #{id}");
     let detail = views::RunDetail {
+        stuck: crate::analysis::run_is_stuck(&stored, &world),
+        csrf: views::Csrf::from_request_parts(csrf.as_ref(), csrf_field.as_ref()),
         run,
         scenario_name,
         world,
