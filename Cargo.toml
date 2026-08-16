@@ -1,0 +1,58 @@
+[workspace]
+# resolver must be stated explicitly: a virtual workspace has no package edition
+# for cargo to infer it from, and edition-2024 members expect resolver 3 semantics.
+resolver = "3"
+members = [
+    "crates/boid-board",
+    "crates/boid-search",
+    "crates/boid-eval-classical",
+    "crates/boid-eval-boids",
+    "crates/boid-uci",
+    "crates/boid-web",
+    "crates/boid-tune",
+]
+
+[workspace.package]
+version      = "0.0.0"
+edition      = "2024"
+rust-version = "1.94"
+license      = "MIT"
+repository   = "https://github.com/madmax983/boidboard"
+authors      = ["Mark Masterson"]
+
+[workspace.dependencies]
+# Intra-workspace.
+boid-board          = { path = "crates/boid-board" }
+boid-search         = { path = "crates/boid-search" }
+boid-eval-classical = { path = "crates/boid-eval-classical" }
+boid-eval-boids     = { path = "crates/boid-eval-boids" }
+boid-uci            = { path = "crates/boid-uci" }
+
+# External, pinned from crates.io per issue #3. Consumed by exactly one crate each,
+# optional and off by default -- see docs/DECISIONS.md D-0012. The real pin lives in
+# Cargo.lock (D-0013): "0.6" is a caret range, not a pin.
+autumn-web     = "0.6"
+autumn-harvest = "0.5"
+
+[workspace.lints.rust]
+missing_docs                  = "warn"
+missing_debug_implementations = "warn"
+# deny, not forbid: issue #5's magic bitboards need a documented, module-scoped
+# exception path. See docs/DECISIONS.md D-0009.
+unsafe_code            = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.test]
+# Debug-mode perft is roughly two orders of magnitude slower. Without this the suite
+# becomes unrunnable the moment issue #6's engine-side perft goes live, and a slow
+# suite is a skipped suite.
+opt-level = 2
+
+[profile.release]
+lto           = "thin"
+codegen-units = 1
+debug         = 1
+# No panic = "abort" anywhere: it breaks #[should_panic].

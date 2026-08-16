@@ -1,0 +1,225 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Deliberately NOT cancel-in-progress. This branch's TDD ladder depends on the red runs
+  # of its RED commits surviving as evidence; cancelling superseded runs would destroy it.
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # AC1 command 1 of 3, plus AC1 command 2 of 3.
+  test:
+    name: build + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Turns "stockfish missing -> silently skip" into "stockfish missing -> fail".
+      # Without this the differential coverage could evaporate on the runner unnoticed.
+      BOIDBOARD_REQUIRE_STOCKFISH: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Stockfish
+        run: ./scripts/setup-stockfish.sh
+      - name: cargo build --workspace
+        run: cargo build --workspace
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+  # AC1 command 3 of 3, verbatim. --all-targets is load-bearing: without it, clippy does
+  # not lint test code at all, and the command becomes a near-no-op for this repository.
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # `cargo fmt` without --check rewrites files and exits 0 unconditionally: it can never
+  # fail. The issue says "CI running fmt" without specifying; this is the only reading
+  # under which the job means anything (docs/DECISIONS.md, D-0039 rationale in the PR).
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo fmt --all -- --check
+
+  # Separate from the AC1 commands, which are kept byte-identical to the issue's text.
+  # This is what actually proves Cargo.lock is honoured (D-0013).
+  locked:
+    name: locked build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --locked
+
+  # Git- and repository-shape assertions. Deliberately a shell job, not a cargo test:
+  # a git-dependent cargo test either fails under actions/checkout's default shallow
+  # clone, or worse, passes vacuously behind a "no git metadata, return early" guard.
+  repo-invariants:
+    name: repo invariants
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Workspace members are exactly the seven crates issue #3 names
+        run: |
+          set -euo pipefail
+          got=$(cargo metadata --no-deps --format-version 1 \
+                | jq -r '.packages[].name' | sort | tr '\n' ' ')
+          want="boid-board boid-eval-boids boid-eval-classical boid-search boid-tune boid-uci boid-web "
+          echo "got:  $got"
+          echo "want: $want"
+          [ "$got" = "$want" ]
+
+      - name: Intra-workspace dependency edges match the declared DAG
+        run: |
+          set -euo pipefail
+          cargo metadata --no-deps --format-version 1 | jq -r '
+            .packages[] as $p
+            | $p.dependencies[]
+            | select(.path != null)
+            | "\($p.name) -> \(.name)"
+          ' | sort -u > /tmp/actual-edges.txt
+          sort -u .github/expected-dep-edges.txt > /tmp/expected-edges.txt
+          echo "--- actual ---"; cat /tmp/actual-edges.txt
+          diff -u /tmp/expected-edges.txt /tmp/actual-edges.txt
+
+      - name: boid-search must never depend on a concrete evaluator (D-0010)
+        run: |
+          set -euo pipefail
+          if grep -qE '^boid-search -> boid-eval' /tmp/actual-edges.txt; then
+            echo "D-0010 violated: boid-search depends on a concrete evaluator."
+            echo "Evaluator selection is a runtime UCI option, not a build-time edge."
+            exit 1
+          fi
+
+      - name: No .rs files under the repository-root tests/ directory (D-0007)
+        run: |
+          set -euo pipefail
+          # A virtual workspace has no root package, so Cargo never compiles this
+          # directory. Code placed here would silently never run.
+          found=$(find tests -name '*.rs' -type f 2>/dev/null || true)
+          if [ -n "$found" ]; then
+            echo "Found .rs files under the root tests/ directory; they will never be compiled:"
+            echo "$found"
+            exit 1
+          fi
+
+      - name: No self-authored acceptance-criteria document (D-0002)
+        run: |
+          set -euo pipefail
+          found=$(find docs -iname 'accept*' -o -iname 'criteria*' 2>/dev/null || true)
+          if [ -n "$found" ]; then
+            echo "D-0002 violated: this project may not author its own acceptance criteria"
+            echo "in-repo until the perft harness is green. Found:"
+            echo "$found"
+            exit 1
+          fi
+
+      - name: Perft oracle fixture is ASCII-only (D-0008)
+        run: |
+          set -euo pipefail
+          # Six of the seven published FENs use U+00A0. Stockfish's tokeniser is ASCII-only
+          # and silently mis-parses those into a different position reporting 0 nodes.
+          if LC_ALL=C grep -nP '[^\x00-\x7F]' tests/fixtures/perft_oracle.txt; then
+            echo "Non-ASCII byte in the perft oracle fixture (see D-0008)."
+            exit 1
+          fi
+          echo "fixture is ASCII-only"
+
+      - name: gitignore patterns are directory-anchored (D-0005)
+        run: |
+          set -euo pipefail
+          git check-ignore -q target/debug/x \
+            || { echo "target/debug/x should be ignored"; exit 1; }
+          if git check-ignore -q crates/boid-board/src/target/mod.rs; then
+            echo "An unanchored 'target' pattern is also ignoring source files."
+            exit 1
+          fi
+          echo "build-artifact patterns are directory-anchored"
+
+      - name: Cargo.lock is tracked (D-0013)
+        run: |
+          set -euo pipefail
+          git ls-files --error-unmatch Cargo.lock >/dev/null
+          grep -q 'name = "autumn-web"' Cargo.lock
+          grep -q 'name = "autumn-harvest"' Cargo.lock
+          echo "Cargo.lock is tracked and pins both autumn crates"
+
+      - name: Anti-theatre scan
+        run: ./scripts/anti-theatre.sh
+
+      - name: Quarantine — no archived code may re-enter the tree (D-0001)
+        run: |
+          set -euo pipefail
+          ARCHIVED=a1f70323c6d56629a18e959894f0815efa0d3ac9
+
+          # Keyed on the COMMIT, not the tag, so enforcement does not depend on a tag push.
+          if ! git cat-file -e "$ARCHIVED^{commit}" 2>/dev/null; then
+            git fetch --no-tags origin "$ARCHIVED" || true
+          fi
+          if ! git cat-file -e "$ARCHIVED^{commit}" 2>/dev/null; then
+            echo "Archived commit $ARCHIVED unavailable on this runner; cannot verify."
+            exit 1
+          fi
+
+          if git merge-base --is-ancestor "$ARCHIVED" HEAD; then
+            echo "D-0001 violated: the archived attempt is an ancestor of HEAD."
+            exit 1
+          fi
+
+          # No byte-identical blob may be copied out of the archived tree. LICENSE is the
+          # sole allowance: it is unchanged from this repository's initial commit and
+          # predates the attempt.
+          git ls-tree -r HEAD       | awk '{print $3}' | sort -u > /tmp/head-blobs.txt
+          git ls-tree -r "$ARCHIVED"| awk '{print $3}' | sort -u > /tmp/arch-blobs.txt
+          license=$(git rev-parse HEAD:LICENSE)
+          shared=$(comm -12 /tmp/head-blobs.txt /tmp/arch-blobs.txt | grep -vxF "$license" || true)
+          if [ -n "$shared" ]; then
+            echo "D-0001 violated: blobs shared with the archived tree:"
+            for b in $shared; do echo "  $b"; git ls-tree -r HEAD | grep "$b" || true; done
+            exit 1
+          fi
+          echo "quarantine intact: no shared blobs, not an ancestor"
+
+      - name: Archive tag points at the archived commit (AC4)
+        run: |
+          set -euo pipefail
+          ARCHIVED=a1f70323c6d56629a18e959894f0815efa0d3ac9
+          if git rev-parse -q --verify refs/tags/archive/boids-sim-attempt >/dev/null; then
+            got=$(git rev-parse 'refs/tags/archive/boids-sim-attempt^{commit}')
+            echo "tag -> $got"
+            [ "$got" = "$ARCHIVED" ] || { echo "Tag points at the wrong commit."; exit 1; }
+            echo "AC4 satisfied: archive/boids-sim-attempt -> $ARCHIVED"
+          else
+            echo "::warning title=AC4 pending::refs/tags/archive/boids-sim-attempt is not on"
+            echo "origin. The session that created this branch could not push tags (HTTP 403;"
+            echo "its credential is scoped to refs/heads/*). The annotated tag was created"
+            echo "locally and must be pushed by a maintainer:"
+            echo "  git tag -a archive/boids-sim-attempt $ARCHIVED -m 'Quarantine: prior attempt (PR #2)'"
+            echo "  git push origin archive/boids-sim-attempt"
+            echo "This step will enforce the tag's target automatically once it exists."
+          fi

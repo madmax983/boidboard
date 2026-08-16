@@ -1,0 +1,24 @@
+[package]
+name         = "boid-tune"
+description  = "Texel tuning, the ablation matrix, and the SPRT gauntlet."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+
+[dependencies]
+boid-board          = { workspace = true }
+boid-search         = { workspace = true }
+boid-eval-classical = { workspace = true }
+boid-eval-boids     = { workspace = true }
+boid-uci            = { workspace = true }
+# See boid-web. Off by default; the pin lives in Cargo.lock (D-0012, D-0013).
+autumn-harvest = { workspace = true, optional = true }
+
+[features]
+orchestrate = ["dep:autumn-harvest"]
+
+[lints]
+workspace = true

@@ -1,0 +1,25 @@
+[package]
+name         = "boid-web"
+description  = "Analysis board with the live force overlay."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+
+[dependencies]
+boid-board          = { workspace = true }
+boid-search         = { workspace = true }
+boid-eval-classical = { workspace = true }
+boid-eval-boids     = { workspace = true }
+# Pinned from crates.io per issue #3. Optional and off by default so that AC1's
+# `cargo build --workspace` does not pay for a ~400-package tree; the pin is still real
+# because an optional dependency is resolved into Cargo.lock. See D-0012.
+autumn-web = { workspace = true, optional = true }
+
+[features]
+serve = ["dep:autumn-web"]
+
+[lints]
+workspace = true

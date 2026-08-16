@@ -393,10 +393,16 @@ Context:      D-0001 quarantines the prior attempt because its geometry is conti
 Decision:     Evaluation is fixed-point integer arithmetic. `clippy::float_arithmetic` is
   `deny` in `boid-eval-classical` and `boid-eval-boids`.
 
+  The denial is a crate-root attribute (`#![deny(clippy::float_arithmetic)]`) rather than a
+  `[lints.clippy]` table in those two manifests, because Cargo rejects a manifest that both
+  inherits the workspace lint table (`[lints] workspace = true`) and adds local lints:
+  "cannot override `workspace.lints` in `lints`". Spelling the whole workspace table out
+  again in two manifests would guarantee drift; the crate attribute composes instead.
+
 Rule:         No floating-point arithmetic in `boid-eval-classical` or `boid-eval-boids`.
 
-Evidence:     The lint table in each of those two crate manifests; enforced by
-  `cargo clippy --workspace --all-targets -- -D warnings`.
+Evidence:     The `#![deny(clippy::float_arithmetic)]` attribute at the root of each of
+  those two crates; enforced by `cargo clippy --workspace --all-targets -- -D warnings`.
 
 Consequences: Continuous-space boids code -- the exact thing D-0001 quarantines -- fails the
   build on contact, so the architecture rejects the old idea rather than a grep rejecting

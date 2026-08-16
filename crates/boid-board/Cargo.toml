@@ -1,0 +1,16 @@
+[package]
+name         = "boid-board"
+description  = "Board representation, move generation, and the perft oracle."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+
+# Zero external dependencies, deliberately: this is the dependency root of the whole
+# workspace and it should compile in well under a second, forever. See D-0014.
+[dependencies]
+
+[lints]
+workspace = true
