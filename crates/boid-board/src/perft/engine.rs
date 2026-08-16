@@ -89,7 +89,9 @@ impl fmt::Display for EngineError {
                 "FEN contains a non-ASCII byte, which Stockfish would silently mis-parse \
                  into a different position: {fen:?}"
             ),
-            Self::Io(e) => write!(f, "engine process error: {e}"),
+            // Deliberately does NOT embed `{e}`: this variant returns the io::Error from
+            // source(), so a printer that walks the chain would otherwise show it twice.
+            Self::Io(_) => write!(f, "engine process error"),
             Self::NoNodeCount { output } => write!(
                 f,
                 "engine printed no 'Nodes searched:' line; last output was: {output}"

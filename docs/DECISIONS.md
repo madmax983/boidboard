@@ -527,6 +527,15 @@ Decision:     The following are deliberately deferred:
     an option for issue #6.
   - **`include_str!` reaching outside the crate directory** breaks `cargo package --verify`
     for `boid-board`. Accepted: nothing here publishes to crates.io.
+  - **`validate_fen` returns `Result<(), String>`.** An unmatchable error, immediately
+    re-stringified into `OracleError::MalformedFen`. Correct for a fixture validator, wrong
+    for the FEN reader issue #4 will build on it: a caller that wants to branch on *why* a
+    FEN was rejected cannot. Deferred to #4, which should introduce a typed `FenError` and
+    have this function return it.
+  - **`PerftEngine` has no `divide`.** Perft divide -- the per-root-move breakdown -- is the
+    only practical way to localise a mismatch, and issue #6 names it explicitly. Deliberately
+    not guessed at now: its return shape depends on how #4 represents a move, and inventing
+    that before `Move` exists would cost a rewrite. #6 adds it to the trait.
 
 Rule:         Revisit each deferral in the issue named against it; do not let a deferral
   become an unexamined default.
@@ -614,6 +623,16 @@ Decision:     The corrections are recorded here rather than by editing history.
   still green: `fen_fields()` could `return 4`, and `verified_counts()` could drop its
   provenance filter. An accessor that every assertion trusts is a single point at which all
   of them can be made to lie. Both mutations are now caught.
+
+  **A miscount in a commit message.** `111a360` says the second transcription holds "39
+  canonical counts typed by hand". It holds **37**. The commit is merged and its message is
+  immutable, so the correction lives here.
+
+  **A blind spot the budget creates.** `cargo test --workspace` replays only the 30 verified
+  rows under the default 5,000,000-node ceiling, so a corrupted verified count *deeper* than
+  the budget is invisible locally. It is not invisible in CI: the nightly `deep-perft` job
+  raises the ceiling and replays all 44. The differential harness's module doc now says so
+  rather than leaving the reader to infer coverage it does not have.
 
 Rule:         A numeric claim about this project, made anywhere -- commit message, README,
   decision log, pull request -- must be asserted by a test if it is asserted at all.

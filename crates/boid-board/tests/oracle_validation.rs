@@ -326,3 +326,62 @@ fn accepts_large_but_valid_move_counters() {
         "six-field FEN with large counters must parse"
     );
 }
+
+#[test]
+fn rejects_id_outside_the_documented_grammar() {
+    // The fixture header documents `id  [a-z0-9-]+`. A documented grammar that nothing
+    // enforces is a comment, not a rule.
+    for bad in ["Startpos", "start pos", "start_pos", ""] {
+        let text = format!("{bad} | 4k3/8/8/8/8/8/8/4K3 w - - 0 1 | 1:20v");
+        let e = err(&text);
+        assert!(
+            matches!(
+                e,
+                OracleError::MalformedId { .. } | OracleError::MalformedLine { .. }
+            ),
+            "expected the id {bad:?} to be rejected, got {e:?}"
+        );
+    }
+}
+
+#[test]
+fn rejects_depth_that_does_not_fit_in_u32() {
+    let e = err("x | 4k3/8/8/8/8/8/8/4K3 w - - 0 1 | 4294967296:20v");
+    assert!(
+        matches!(e, OracleError::DepthOutOfRange { .. }),
+        "expected DepthOutOfRange, got {e:?}"
+    );
+}
+
+#[test]
+fn rejects_consecutive_digits_in_a_rank() {
+    // "1111K111" sums to 8 files but is not canonical FEN, and a rank-sum check alone
+    // waves it through.
+    let e = err("x | 4k3/8/8/8/8/8/8/1111K111 w - - 0 1 | 1:20v");
+    assert!(
+        matches!(e, OracleError::MalformedFen { .. }),
+        "expected MalformedFen, got {e:?}"
+    );
+}
+
+#[test]
+fn rejects_en_passant_square_contradicting_the_side_to_move() {
+    // After white pushes a pawn two squares the target is on rank 3 and it is black's
+    // turn. The reverse pairing is decidable without a board.
+    let e = err("x | 4k3/8/8/8/8/8/8/4K3 w - e3 0 1 | 1:20v");
+    assert!(
+        matches!(e, OracleError::MalformedFen { .. }),
+        "expected MalformedFen for w-to-move with a rank-3 target, got {e:?}"
+    );
+    let e = err("x | 4k3/8/8/8/8/8/8/4K3 b - e6 0 1 | 1:20v");
+    assert!(
+        matches!(e, OracleError::MalformedFen { .. }),
+        "expected MalformedFen for b-to-move with a rank-6 target, got {e:?}"
+    );
+}
+
+#[test]
+fn accepts_en_passant_square_consistent_with_the_side_to_move() {
+    assert!(parse("x | 4k3/8/8/8/8/8/8/4K3 b - e3 0 1 | 1:20v").is_ok());
+    assert!(parse("x | 4k3/8/8/8/8/8/8/4K3 w - e6 0 1 | 1:20v").is_ok());
+}

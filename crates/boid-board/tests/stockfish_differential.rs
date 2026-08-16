@@ -24,8 +24,13 @@
 use boid_board::perft::engine::{EngineError, PerftEngine, StockfishEngine};
 use boid_board::perft::oracle::{ORACLE_TEXT, parse};
 
-/// Default replay ceiling: about 16 million nodes across the whole fixture, well under a
-/// second against Stockfish.
+/// Default replay ceiling. Replays 30 of the fixture's 44 verified rows, roughly 16
+/// million nodes, measured at about 8 seconds against Stockfish 16 — dominated by process
+/// startup, since each query spawns its own engine.
+///
+/// Counts above this ceiling are NOT replayed by `cargo test --workspace`, so a corrupted
+/// verified row deeper than the budget is invisible locally. The nightly `deep-perft` job
+/// raises `BOID_PERFT_MAX_NODES` to replay all 44.
 const DEFAULT_MAX_NODES: u64 = 5_000_000;
 
 fn max_nodes() -> u64 {

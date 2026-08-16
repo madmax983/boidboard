@@ -10,8 +10,11 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  # Deliberately NOT cancel-in-progress. This branch's TDD ladder depends on the red runs
-  # of its RED commits surviving as evidence; cancelling superseded runs would destroy it.
+  # Deliberately NOT cancel-in-progress: a superseded run is still the only record that a
+  # given commit was red or green, and this project treats that record as evidence.
+  # (Note: pushing several commits at once produces one run for the pushed head, not one
+  # per commit, so the ladder's per-commit reds are evidenced by re-running each RED commit
+  # in a worktree rather than by CI history.)
   cancel-in-progress: false
 
 env:

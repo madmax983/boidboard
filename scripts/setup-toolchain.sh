@@ -26,3 +26,9 @@ done
 rustup show active-toolchain
 cargo --version
 rustc --version
+
+# rust-toolchain.toml declares rustfmt and clippy. A partially-materialised toolchain would
+# otherwise fail later, inside the fmt or clippy job, looking like a lint failure.
+for component in fmt clippy; do
+  cargo "$component" --version
+done

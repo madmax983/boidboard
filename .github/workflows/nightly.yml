@@ -21,8 +21,9 @@ jobs:
     timeout-minutes: 60
     env:
       BOIDBOARD_REQUIRE_STOCKFISH: "1"
-      # Replay every independently-verified count in the fixture, not just the cheap tier.
-      # ~12 billion nodes across the seven positions.
+      # Replay every independently-verified count in the fixture, not just the cheap tier:
+      # all 44 'v' rows rather than the 30 that fit the default budget. Roughly 23 billion
+      # nodes across the seven positions -- kiwipete d6 alone is 8.0e9 and takes ~57s.
       BOID_PERFT_MAX_NODES: "20000000000"
     steps:
       - uses: actions/checkout@v4

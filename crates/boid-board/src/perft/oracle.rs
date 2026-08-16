@@ -172,6 +172,20 @@ pub enum OracleError {
         /// 1-based line number in the fixture.
         line: usize,
     },
+    /// A depth was numeric but did not fit in `u32`.
+    DepthOutOfRange {
+        /// 1-based line number in the fixture.
+        line: usize,
+        /// The offending token, verbatim.
+        token: String,
+    },
+    /// An id did not match the documented `[a-z0-9-]+` grammar.
+    MalformedId {
+        /// 1-based line number in the fixture.
+        line: usize,
+        /// The offending id, verbatim.
+        id: String,
+    },
     /// The fixture contained no positions.
     NoEntries,
 }
@@ -218,6 +232,13 @@ impl fmt::Display for OracleError {
                 write!(f, "line {line}: malformed FEN: {reason}")
             }
             Self::NoCounts { line } => write!(f, "line {line}: position has no depth counts"),
+            Self::DepthOutOfRange { line, token } => {
+                write!(f, "line {line}: depth does not fit in u32: {token:?}")
+            }
+            Self::MalformedId { line, id } => write!(
+                f,
+                "line {line}: id {id:?} must match [a-z0-9-]+, as the fixture header documents"
+            ),
             Self::NoEntries => write!(f, "oracle fixture contains no positions"),
         }
     }
@@ -288,6 +309,19 @@ pub fn parse(text: &str) -> Result<Vec<PerftCase<'_>>, OracleError> {
             });
         }
         let (id, fen, counts_field) = (fields[0], fields[1], fields[2]);
+
+        // The header documents `id  [a-z0-9-]+`. A documented grammar that is not enforced
+        // is a comment, not a rule.
+        if id.is_empty()
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return Err(OracleError::MalformedId {
+                line,
+                id: id.to_owned(),
+            });
+        }
 
         if cases.iter().any(|c| c.id == id) {
             return Err(OracleError::DuplicateId {
@@ -367,7 +401,19 @@ pub fn validate_fen(fen: &str) -> Result<(), String> {
     let (mut white_kings, mut black_kings) = (0u32, 0u32);
     for (i, rank) in ranks.iter().enumerate() {
         let mut files = 0u32;
+        let mut previous_was_digit = false;
         for ch in rank.chars() {
+            if ch.is_ascii_digit() {
+                if previous_was_digit {
+                    return Err(format!(
+                        "rank {} uses consecutive digits, which is not canonical FEN: {rank:?}",
+                        8 - i
+                    ));
+                }
+                previous_was_digit = true;
+            } else {
+                previous_was_digit = false;
+            }
             match ch {
                 '1'..='8' => files += ch as u32 - '0' as u32,
                 'K' => {
@@ -435,6 +481,17 @@ pub fn validate_fen(fen: &str) -> Result<(), String> {
                 "en passant target must be '-' or a square on rank 3 or 6, found {ep:?}"
             ));
         }
+        // The rank follows from the side to move: after white pushes a pawn two squares
+        // the target is on rank 3 and it is black's turn, and vice versa. A contradiction
+        // here is decidable without a board, so it is caught here rather than in #4.
+        let expected_rank = if fields[1] == "w" { b'6' } else { b'3' };
+        if bytes[1] != expected_rank {
+            return Err(format!(
+                "en passant target {ep:?} contradicts the side to move ({}): expected rank {}",
+                fields[1],
+                char::from(expected_rank)
+            ));
+        }
     }
 
     // --- 5, 6. halfmove clock and fullmove number, when present ---
@@ -470,7 +527,15 @@ fn parse_counts(line: usize, field: &str) -> Result<Vec<DepthCount>, OracleError
         if depth_str.is_empty() || !depth_str.bytes().all(|b| b.is_ascii_digit()) {
             return Err(malformed());
         }
-        let depth: u32 = depth_str.parse().map_err(|_| malformed())?;
+        // A depth wider than u32 is a malformed token, but say so precisely rather than
+        // through MalformedCountToken's "must be of the form depth:nodes<flag>" message,
+        // which would misdescribe a token that has exactly that form.
+        let depth: u32 = depth_str
+            .parse()
+            .map_err(|_| OracleError::DepthOutOfRange {
+                line,
+                token: token.to_owned(),
+            })?;
 
         // The provenance flag is the final byte. Its absence is an error rather than a
         // default: an unflagged count would silently claim whichever trust level the
