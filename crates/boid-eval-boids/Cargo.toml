@@ -1,0 +1,16 @@
+[package]
+name         = "boid-eval-boids"
+description  = "Boids force-field evaluation: the experiment."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+
+[dependencies]
+boid-board = { workspace = true }
+
+[lints]
+workspace = true
+

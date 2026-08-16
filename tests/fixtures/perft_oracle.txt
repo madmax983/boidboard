@@ -1,0 +1,69 @@
+# boidboard perft oracle -- published node counts for the six standard perft positions.
+#
+# This file is DATA, not code. It is the external oracle against which boidboard's move
+# generator is judged in issue #6. It was authored before any engine code existed, which
+# is the entire point of it: the criteria precede the implementation.
+#
+# PROVENANCE
+#   requested-url:      https://www.chessprogramming.org/Perft_Results
+#   source-url:         https://chessprogramming.org/Perft_Results  (HTTP 308 from the above)
+#   fetched:            2026-08-16
+#   http-status:        200
+#   page-bytes:         33664
+#   page-sha256:        8c6ba8849553f39be1edf5182d5cd10618b90ae7d28a85c41bfff53d17e36741
+#   page-last-modified: Wed, 05 Aug 2026 21:11:17 GMT
+#   page-licence:       CC BY-SA 3.0, Chess Programming Wiki contributors
+#   page-note:          served from a read-only recovery mirror of the wiki; no MediaWiki
+#                       oldid permalink was available, hence the content hash above.
+#   corroborated-with:  Stockfish 16 (Ubuntu package 16-1build1, noble/universe),
+#                       binary sha256
+#                       00628bd9c9855c1b7ff93d7f8d51b413586cdc6336fe637f9a14a61531a05aca
+#
+# GRAMMAR (ASCII only; no tabs; ' | ' field separator; '#' begins a comment line)
+#   id | fen | depth:nodes<flag> [depth:nodes<flag> ...]
+#     id     [a-z0-9-]+, unique within the file
+#     fen    as published, with U+00A0 separators normalised to U+0020 and trailing
+#            whitespace stripped. The FIELD COUNT is preserved -- see the kiwipete note.
+#     depth  decimal, ascending, contiguous, no duplicates
+#     nodes  decimal digits only, no thousands separators, must fit in u64
+#     flag   v = independently re-derived with Stockfish 16 by this project, 2026-08-16
+#            p = published only; NOT corroborated here
+#
+# DEPTH BUDGET
+#   The differential harness replays every 'v' count whose value is <= the environment
+#   variable BOID_PERFT_MAX_NODES (default 5000000). 'p' counts are documentation and are
+#   never replayed. Budgeting by NODE COUNT rather than by depth keeps the policy correct
+#   as positions are added: position3 depth 5 is 674624 nodes while kiwipete depth 4 is
+#   4085603, so a depth cutoff would either waste cheap coverage or blow the budget.
+#
+# NORMALISATION (see docs/DECISIONS.md D-0008)
+#   Six of the seven FENs are published with U+00A0 NON-BREAKING SPACE separators. They are
+#   normalised to U+0020 here. This is a declared change, not verbatim storage, because
+#   Stockfish's tokeniser is ASCII-only and silently mis-parses an NBSP-separated FEN into a
+#   different legal position reporting "Nodes searched: 0", while Rust's split_whitespace
+#   accepts it -- a silent wrong-answer path that would surface in issue #6 as a phantom
+#   move-generation bug.
+#
+# NOT COMMITTED AS DATA
+#   These published values exceed u64::MAX (18446744073709551615) and the wiki sources
+#   them from forum estimate threads rather than exhaustive computation:
+#     startpos depth 14 = 61885021521585529237
+#     startpos depth 15 = 2015099950053364471960
+#
+# NOTE (kiwipete)
+#   Published with FOUR FEN fields -- no halfmove or fullmove counters. Stored that way.
+#   Do NOT append " 0 1". Stockfish accepts the four-field form; perft 3 = 97862.
+#
+# NOTE (position4-mirror)
+#   The colour-mirror the wiki publishes alongside position4. Its counts are identical to
+#   position4 at EVERY depth by construction, so no count-based test can tell the two rows
+#   apart -- only byte-identity of the FEN strings can. Both are committed for exactly that
+#   reason, and a test asserts the FENs differ while the count vectors match.
+#
+startpos | rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 | 0:1p 1:20v 2:400v 3:8902v 4:197281v 5:4865609v 6:119060324v 7:3195901860v 8:84998978956p 9:2439530234167p 10:69352859712417p 11:2097651003696806p 12:62854969236701747p 13:1981066775000396239p
+kiwipete | r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - | 1:48v 2:2039v 3:97862v 4:4085603v 5:193690690v 6:8031647685v
+position3 | 8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1 | 1:14v 2:191v 3:2812v 4:43238v 5:674624v 6:11030083v 7:178633661v 8:3009794393v
+position4 | r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1 | 1:6v 2:264v 3:9467v 4:422333v 5:15833292v 6:706045033v
+position4-mirror | r2q1rk1/pP1p2pp/Q4n2/bbp1p3/Np6/1B3NBn/pPPP1PPP/R3K2R b KQ - 0 1 | 1:6v 2:264v 3:9467v 4:422333v 5:15833292v 6:706045033v
+position5 | rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8 | 1:44v 2:1486v 3:62379v 4:2103487v 5:89941194v
+position6 | r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10 | 0:1p 1:46v 2:2079v 3:89890v 4:3894594v 5:164075551v 6:6923051137v 7:287188994746p 8:11923589843526p 9:490154852788714p

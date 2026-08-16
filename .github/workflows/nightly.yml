@@ -1,0 +1,70 @@
+name: Nightly
+
+# The per-push CI path is deliberately cheap. This is where the expensive checks live:
+# the deep perft tier, and a build with the autumn dependencies actually switched on.
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  deep-perft:
+    name: deep perft replay
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      BOIDBOARD_REQUIRE_STOCKFISH: "1"
+      # Replay every independently-verified count in the fixture, not just the cheap tier.
+      # ~12 billion nodes across the seven positions.
+      BOID_PERFT_MAX_NODES: "20000000000"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Install pinned toolchain
+        run: ./scripts/setup-toolchain.sh
+      - run: ./scripts/setup-stockfish.sh
+      - run: cargo test --workspace -- --nocapture
+
+  # The pin in Cargo.toml is only meaningful if something compiles it. Nothing on the
+  # per-push path does, by design (D-0012), so it is proven here instead: a yanked
+  # release, a broken 0.6.x, or a missing native dependency surfaces within a day.
+  autumn-features:
+    name: autumn dependencies, features on
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Install pinned toolchain
+        run: ./scripts/setup-toolchain.sh
+      - name: Install libpq
+        # autumn-web's default features reach diesel/postgres. Today pq-sys emits no link
+        # directive so nothing needs libpq, but that is latent rather than absent, and one
+        # apt line is cheaper than a mystery link failure in issue #16.
+        run: sudo apt-get update -qq && sudo apt-get install -y libpq-dev
+      - run: cargo build -p boid-web  --features serve
+      - run: cargo build -p boid-tune --features orchestrate
+      - name: The pin is exercised, not merely declared
+        run: |
+          set -euo pipefail
+          cargo tree -p boid-web  --features serve       -i autumn-web
+          cargo tree -p boid-tune --features orchestrate -i autumn-harvest
+
+  cold-cache-locked:
+    name: cold-cache locked build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      # Deliberately no rust-cache: this job exists to prove a clean checkout builds.
+      - name: Install pinned toolchain
+        run: ./scripts/setup-toolchain.sh
+      - run: cargo build --workspace --locked
+      - run: cargo test --workspace --locked

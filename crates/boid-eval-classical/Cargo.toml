@@ -1,0 +1,16 @@
+[package]
+name         = "boid-eval-classical"
+description  = "Classical control evaluation: the Elo anchor for the boids experiment."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+
+[dependencies]
+boid-board = { workspace = true }
+
+[lints]
+workspace = true
+

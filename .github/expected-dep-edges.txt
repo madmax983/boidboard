@@ -1,0 +1,25 @@
+# The intra-workspace dependency DAG, asserted by the `repo-invariants` CI job against
+# `cargo metadata`. One edge per line: "<crate> -> <dependency>". Sorted.
+#
+# The load-bearing absence is `boid-search -> boid-eval-*`. If search ever depends on a
+# concrete evaluator, issue #13's decision gate and issue #16's ablation campaign become a
+# loop over cargo builds instead of a loop over UCI options, and every SPRT result carries
+# a build-provenance question. See docs/DECISIONS.md D-0010.
+#
+# boid-board itself has no outgoing edges and no external dependencies at all.
+boid-eval-boids -> boid-board
+boid-eval-classical -> boid-board
+boid-search -> boid-board
+boid-tune -> boid-board
+boid-tune -> boid-eval-boids
+boid-tune -> boid-eval-classical
+boid-tune -> boid-search
+boid-tune -> boid-uci
+boid-uci -> boid-board
+boid-uci -> boid-eval-boids
+boid-uci -> boid-eval-classical
+boid-uci -> boid-search
+boid-web -> boid-board
+boid-web -> boid-eval-boids
+boid-web -> boid-eval-classical
+boid-web -> boid-search

@@ -1,0 +1,6 @@
+[toolchain]
+# Pinned so that `clippy -D warnings` means one identical thing locally and in CI.
+# With a floating toolchain, a future Rust release can turn CI red with no change to
+# this repository. See docs/DECISIONS.md D-0009.
+channel    = "1.94.1"
+components = ["rustfmt", "clippy"]

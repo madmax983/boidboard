@@ -1,0 +1,18 @@
+[package]
+name         = "boid-uci"
+description  = "UCI protocol, time management, and the boidboard binary."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+
+[dependencies]
+boid-board          = { workspace = true }
+boid-search         = { workspace = true }
+boid-eval-classical = { workspace = true }
+boid-eval-boids     = { workspace = true }
+
+[lints]
+workspace = true
