@@ -1404,6 +1404,133 @@ async fn ac36_a_run_resumed_from_its_postgres_checkpoint_reaches_the_same_final_
     );
 }
 
+// ───────────────── AC-38, the reproduce-from-provenance half ─────────────────
+//
+// `persistence.rs::ac38_run_round_trips_its_full_provenance_record` proves the
+// four provenance fields survive a write and a re-read. That is only the first
+// half of AC-38. The second half — "**re-running from provenance reproduces the
+// state hash exactly**" — is the half a user actually cares about, because the
+// detail page prints that hash as a claim that the run can be re-created.
+//
+// Nothing asserted it. `ac36_…` comes closest, but it builds its reference
+// `SimParams` in memory rather than reading them back out of the stored
+// `config_snapshot`, so a run whose snapshot recorded parameters other than the
+// ones it executed would still have passed the whole suite. That is precisely
+// the forgery the security review described, and the fingerprint is worth
+// nothing if it is not checkable from the row alone.
+
+/// Re-run a stored run **using only its own provenance record**, and return the
+/// state hash the kernel reaches.
+///
+/// Deliberately takes `&Run` and touches no other source: `config_snapshot`,
+/// `seed` and `ticks_completed` are read off the row, and the kernel does the
+/// rest. No connection, no frames, no remembered parameters — exactly what a
+/// third party holding nothing but this row could do.
+fn reproduce_from_provenance(run: &Run) -> String {
+    let params: SimParams = serde_json::from_value(run.config_snapshot.clone())
+        .expect("a run's config_snapshot must deserialize into the parameters it ran");
+    let start = SimState::seeded(&params, run.seed.cast_unsigned());
+    let ticks = u32::try_from(run.ticks_completed).expect("ticks_completed fits in u32");
+    let (end, _) = boids_core::sim::run_batch(&start, &params, ticks, 0);
+    end.state_hash_hex()
+}
+
+/// **The reproducibility claim, checked from the stored row alone.**
+#[tokio::test]
+async fn ac38_re_running_a_completed_run_from_its_provenance_reproduces_its_state_hash() {
+    let client = test_client();
+    let pool = client.state().pool().expect("transactional pool").clone();
+    let run = seed_run(&pool, 18, 240, 0x0A11_5EED).await;
+    let mut conn = pool.get().await.expect("checkout connection");
+
+    // Drive the run to its budget through the real activity, then close it out
+    // through the real finalizer, so `final_state_hash` is written by the
+    // production path and not by the test.
+    let mut cursor = 0;
+    let mut last = String::new();
+    while cursor < 240 {
+        let batch = simulate_batch_core(&mut conn, &batch_request(run.id, cursor, 60))
+            .await
+            .expect("batch runs");
+        cursor = batch.next_tick;
+        last = batch.state_hash;
+    }
+    finalize_run_core(
+        &mut conn,
+        &FinalizeRequest {
+            run_id: run.id,
+            status: run_status::COMPLETED.to_owned(),
+            ticks_completed: cursor,
+            final_state_hash: last,
+            error: None,
+        },
+    )
+    .await
+    .expect("run finalizes");
+
+    // From here on, the only thing this test may consult is the stored row.
+    let stored = load_run(&mut conn, run.id).await;
+    assert_eq!(stored.status, run_status::COMPLETED);
+    assert_eq!(stored.ticks_completed, 240);
+    let recorded = stored
+        .final_state_hash
+        .clone()
+        .expect("a completed run records the hash of the flock it ended on");
+
+    assert_eq!(
+        reproduce_from_provenance(&stored),
+        recorded,
+        "AC-38: a run must be reproducible from the provenance it stores. The \
+         detail page prints this hash as a promise that the seed, the config \
+         snapshot and the kernel version are enough to re-create the run; if \
+         they are not, the promise is false."
+    );
+
+    // The kernel version is part of the record, and must name the kernel that
+    // actually produced the hash rather than a stale constant.
+    assert_eq!(stored.kernel_version, boidboard::KERNEL_VERSION);
+    assert!(
+        stored.kernel_version.ends_with(boids_core::version()),
+        "the recorded kernel version must be the running kernel's: {} vs {}",
+        stored.kernel_version,
+        boids_core::version()
+    );
+
+    // ── Non-vacuity. The assertion above must be a statement about *this*
+    // run's provenance, not something that would hold for any row at all. ──
+
+    // A different seed, same everything else.
+    let mut other_seed = stored.clone();
+    other_seed.seed = stored.seed ^ 1;
+    assert_ne!(
+        reproduce_from_provenance(&other_seed),
+        recorded,
+        "the seed must be load-bearing, or the match above proves nothing"
+    );
+
+    // A different config, same seed. `w_cohesion` is a plain steering weight,
+    // so changing it changes the trajectory without invalidating the scenario.
+    let mut other_config = stored.clone();
+    let weight = other_config.config_snapshot["w_cohesion"]
+        .as_f64()
+        .expect("the snapshot records the cohesion weight");
+    other_config.config_snapshot["w_cohesion"] = json!(weight + 0.5);
+    assert_ne!(
+        reproduce_from_provenance(&other_config),
+        recorded,
+        "the config snapshot must be load-bearing too"
+    );
+
+    // A different tick count. The hash names a *moment*, not a scenario.
+    let mut other_length = stored.clone();
+    other_length.ticks_completed = 239;
+    assert_ne!(
+        reproduce_from_provenance(&other_length),
+        recorded,
+        "the recorded hash must be the hash at the tick the run actually reached"
+    );
+}
+
 // ─────────────────── activity registration ───────────────────
 
 /// The names the workflow schedules must be the names the worker registers.
