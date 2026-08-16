@@ -232,6 +232,8 @@ pub fn parse(text: &str) -> Result<Vec<PerftCase<'_>>, OracleError> {
             });
         }
 
+        validate_fen(fen).map_err(|reason| OracleError::MalformedFen { line, reason })?;
+
         let counts = parse_counts(line, counts_field)?;
         if counts.is_empty() {
             return Err(OracleError::NoCounts { line });
@@ -244,6 +246,123 @@ pub fn parse(text: &str) -> Result<Vec<PerftCase<'_>>, OracleError> {
         return Err(OracleError::NoEntries);
     }
     Ok(cases)
+}
+
+/// Check that `fen` is structurally well-formed.
+///
+/// This is a *structural* check, not a legality check: it verifies that the string
+/// describes a board at all, not that the position could arise in a game. Legality is
+/// issue #4's problem, and needs a `Position` to express.
+///
+/// Accepts four-field FENs as well as six-field ones, because the published Kiwipete FEN
+/// omits the halfmove and fullmove counters and is stored as published (D-0008).
+///
+/// # Errors
+///
+/// Returns a human-readable reason. The caller attaches the line number.
+pub fn validate_fen(fen: &str) -> Result<(), String> {
+    let fields: Vec<&str> = fen.split(' ').collect();
+    if fields.len() != 4 && fields.len() != 6 {
+        return Err(format!(
+            "expected 4 or 6 space-separated fields, found {}: {fen:?}",
+            fields.len()
+        ));
+    }
+
+    // --- 1. piece placement ---
+    let ranks: Vec<&str> = fields[0].split('/').collect();
+    if ranks.len() != 8 {
+        return Err(format!(
+            "piece placement must have 8 ranks, found {}",
+            ranks.len()
+        ));
+    }
+    let (mut white_kings, mut black_kings) = (0u32, 0u32);
+    for (i, rank) in ranks.iter().enumerate() {
+        let mut files = 0u32;
+        for ch in rank.chars() {
+            match ch {
+                '1'..='8' => files += ch as u32 - '0' as u32,
+                'K' => {
+                    white_kings += 1;
+                    files += 1;
+                }
+                'k' => {
+                    black_kings += 1;
+                    files += 1;
+                }
+                'p' | 'n' | 'b' | 'r' | 'q' | 'P' | 'N' | 'B' | 'R' | 'Q' => files += 1,
+                _ => {
+                    return Err(format!("rank {} contains invalid character {ch:?}", 8 - i));
+                }
+            }
+        }
+        if files != 8 {
+            return Err(format!(
+                "rank {} describes {files} files, not 8: {rank:?}",
+                8 - i
+            ));
+        }
+    }
+    if white_kings != 1 || black_kings != 1 {
+        return Err(format!(
+            "expected exactly one king per side, found {white_kings} white and {black_kings} black"
+        ));
+    }
+
+    // --- 2. side to move ---
+    if fields[1] != "w" && fields[1] != "b" {
+        return Err(format!(
+            "side to move must be 'w' or 'b', found {:?}",
+            fields[1]
+        ));
+    }
+
+    // --- 3. castling availability ---
+    let castling = fields[2];
+    if castling != "-" {
+        if castling.is_empty() {
+            return Err("castling field is empty; use '-' for none".to_owned());
+        }
+        let mut seen = String::new();
+        for ch in castling.chars() {
+            if !"KQkq".contains(ch) {
+                return Err(format!("castling field contains invalid character {ch:?}"));
+            }
+            if seen.contains(ch) {
+                return Err(format!("castling field repeats {ch:?}"));
+            }
+            seen.push(ch);
+        }
+    }
+
+    // --- 4. en passant target ---
+    let ep = fields[3];
+    if ep != "-" {
+        let bytes = ep.as_bytes();
+        let ok = bytes.len() == 2
+            && (b'a'..=b'h').contains(&bytes[0])
+            && (bytes[1] == b'3' || bytes[1] == b'6');
+        if !ok {
+            return Err(format!(
+                "en passant target must be '-' or a square on rank 3 or 6, found {ep:?}"
+            ));
+        }
+    }
+
+    // --- 5, 6. halfmove clock and fullmove number, when present ---
+    if fields.len() == 6 {
+        for (name, value) in [
+            ("halfmove clock", fields[4]),
+            ("fullmove number", fields[5]),
+        ] {
+            if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(format!("{name} must be a decimal number, found {value:?}"));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Parse one position's whitespace-separated `depth:nodes<flag>` tokens.
