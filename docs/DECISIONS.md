@@ -682,3 +682,292 @@ Evidence:     `git ls-remote --tags origin` returns nothing. Locally,
 Consequences: The `repo-invariants` job enforces the tag's target the moment it exists and
   warns until then. Quarantine enforcement (D-0001) is unaffected: it keys off the commit
   SHA, so it is live today.
+
+---
+
+## D-0018 — The representation contract, frozen before any key is computed
+
+Status:       Accepted
+Date:         2026-08-16
+
+Context:      Issue #4 fixes the shape of the zobrist key set (768 piece-square keys, one
+  side-to-move key, four castling keys, eight en-passant FILE keys) but not the orderings
+  that turn that shape into 781 specific numbers. Those orderings are unobservable from
+  outside -- two implementations can agree on every published perft count and still hold
+  different tables -- so they must be written down before the first key exists, or the
+  first digest to be pinned silently becomes the specification.
+
+Decision:     Four orderings are frozen, in this entry, before `src/zobrist.rs` is written:
+
+    1. SQUARES are LERF: a1 = 0, b1 = 1, ... h8 = 63. `square = rank * 8 + file`.
+    2. PIECES are `kind * 2 + colour`, with kind order Pawn, Knight, Bishop, Rook, Queen,
+       King and colour order White, Black. So WhitePawn = 0, BlackPawn = 1, ...,
+       BlackKing = 11. This ordering, not the more common colour-major one, is chosen so
+       that the pawn keys are the CONTIGUOUS prefix `[0, 128)` of the piece-square block
+       and the pawn hash needs no second table -- which keeps the issue's "768 keys"
+       literal rather than approximate.
+    3. TABLE ORDER is piece-square (768), then side-to-move (1), then castling (4, in the
+       order WK WQ BK BQ), then en-passant file (8, a..h). Index arithmetic for the
+       piece-square block is `piece * 64 + square`, never `square * 12 + piece`.
+    4. DIGEST SERIALISATION is table index order, each key `to_be_bytes()`, SHA-256 of the
+       concatenation. Big-endian is deliberate: every runner this project has is x86-64, so
+       a `to_ne_bytes` digest would make an endianness bug permanently invisible.
+
+Rule:         The four orderings above are frozen; changing any of them requires a
+  superseding entry AND a re-derived digest. A number measuring this project may not enter
+  this log before the commit that lands the test asserting it (D-0016).
+
+Evidence:     `crates/boid-board/tests/zobrist_table.rs` asserts the index arithmetic
+  against a directly computed index, and `zobrist_digest.rs` pins the digest.
+
+Consequences: Issue #5's magic tables and issue #6's hashed perft can assume the square
+  numbering without re-deriving it, and a reviewer can recompute any single key from this
+  entry plus the seed.
+
+---
+
+## D-0019 — En passant is stored as a FILE, and it is always set
+
+Status:       Accepted
+Date:         2026-08-16
+
+Context:      Issue #4 mandates eight en-passant FILE keys, "the rank is implied by side to
+  move", and that "the en-passant square is set after every double push regardless of
+  whether a capture is available, matching the convention the published perft counts use".
+  There is a second, equally common convention -- record the square only when a capture is
+  actually available -- and Stockfish 16 uses it.
+
+Decision:     `Board` stores `Option<File>`, never a square. The rank is derived on read:
+  rank 6 when White is to move, rank 3 when Black is. That derivation is not an assumption;
+  `oracle::validate_fen` already REJECTS the contradictory pairing, so the invariant is
+  enforced at every entry point into the type.
+
+  Storing a file rather than a square is what makes AC6's second clause -- "positions
+  differing only in an ep square that FEN records identically do not [produce different
+  keys]" -- a theorem about the type rather than a property of the hash that a test must
+  chase. There is no representable state in which two boards differ by an en-passant RANK.
+
+  The always-set convention (issue #4's) diverges from Stockfish's FEN echo. Measured in
+  this container on 2026-08-16:
+
+      position startpos moves e2e4    -> Stockfish `d` prints "... b KQkq - 0 1"
+      fen "... b KQkq e3 0 1"         -> Stockfish `d` prints "... b KQkq - 0 1"
+      fen ".../3pP3/... w KQkq d6 0 3" -> Stockfish `d` prints "... w KQkq d6 0 3"
+
+  Perft counts are unaffected: the conventions differ only in whether a legally unusable
+  target is RECORDED, never in which moves exist. The always-set convention is also the
+  conservative one for issue #6's hashed perft -- it can fail to merge two equivalent
+  positions, costing speed, but can never merge two different ones, costing correctness.
+
+Rule:         `Board` must never store an en-passant rank, and the en-passant file is set
+  after every double push regardless of capturability. No field of `Board` may be undefined
+  after `apply_move`.
+
+Evidence:     `zobrist_incremental::e3_with_black_to_move_and_e6_with_white_differ_by_exactly_the_side_key`,
+  and the Stockfish differential harness excludes the ep field by name rather than by
+  accident.
+
+Consequences: The Stockfish FEN oracle corroborates five of the six FEN fields. The sixth is
+  a declared divergence with a test of its own, not an unexamined gap.
+
+---
+
+## D-0020 — The accepted FEN language is canonical FEN plus one declared elision
+
+Status:       Accepted
+Date:         2026-08-16
+
+Context:      Issue #4 AC1 requires FEN parse -> emit to "round-trip byte-identically for
+  all six perft positions". D-0008 stores the published Kiwipete FEN with FOUR fields, and
+  forbids appending " 0 1" to it. A canonical six-field emitter therefore cannot return
+  Kiwipete's stored bytes, and no reading of AC1 makes all six rows byte-identical.
+
+Decision:     `to_fen` always emits six fields. `Board` carries no memory of how many
+  fields its source text had. Every alternative considered -- a `layout` field, a
+  `fullmove == 0` sentinel, a `FenText` newtype, a `(Board, FenShape)` return -- pays for
+  AC1's literal wording by making `Board` worse: the field would be compared by `PartialEq`,
+  copied on every `apply_move`, and would make two identical positions unequal over a
+  formatting detail.
+
+  AC1 is therefore restated as a LAW over the accepted language, and the restatement is
+  declared here rather than applied silently:
+
+      for every FEN f that `from_fen` accepts,
+        to_fen(from_fen(f)) == f                 when f has six fields
+        to_fen(from_fen(f)) == f + " 0 1"        when f has four fields
+      and there is no third case.
+
+  The four-field canonicalisation is not this project's invention. Stockfish 16, fed the
+  published four-field Kiwipete FEN, echoes it with " 0 1" appended (measured 2026-08-16),
+  so the elision's expansion is externally corroborated rather than chosen here.
+
+Rule:         For every FEN `from_fen` accepts, `to_fen(from_fen(f))` equals `f` when `f`
+  has six fields and `f` followed by " 0 1" when it has four; there is no third case.
+  `tests/fixtures/perft_oracle.txt` is not edited to make this easier.
+
+Evidence:     `fen_roundtrip::six_field_fens_round_trip_byte_identically`,
+  `fen_roundtrip::the_four_field_kiwipete_fen_round_trips_to_its_canonical_six_field_form`,
+  and an empty `git diff origin/main -- tests/fixtures/perft_oracle.txt`.
+
+Consequences: AC1 is reported as satisfied under a declared narrowing, and the narrowing is
+  a stronger statement than the AC's wording -- it quantifies over the whole accepted
+  language rather than over seven rows.
+
+---
+
+## D-0021 — What `from_fen` deliberately does not enforce, and who owns each rule
+
+Status:       Accepted
+Date:         2026-08-16
+
+Context:      A FEN reader can be arbitrarily strict. Strictness that is not written down
+  is indistinguishable from strictness that was not considered, and a rule that is silently
+  absent is discovered in issue #6 as a phantom move-generation bug.
+
+Decision:     `Board::from_fen` enforces: field count (4 or 6); ASCII only; eight ranks;
+  no consecutive skip digits; exactly eight files per rank; exactly one king per side; no
+  pawn on rank 1 or 8; a castling right only when its king and rook stand on their home
+  squares; an en-passant target on the rank implied by the side to move, with the target
+  square empty, the square behind it empty, and the double-pushed pawn present; decimal
+  clocks with no leading zeros, halfmove <= 65535 and fullmove in 1..=65535.
+
+  It deliberately does NOT enforce, with owners:
+
+    - side-not-to-move is in check          -- needs attack tables; issue #5.
+    - the position is reachable from the initial array (promotion budgets, bishop parity)
+                                            -- not decidable cheaply; no owner, and no
+                                               engine needs it.
+    - Shredder / X-FEN castling notation (`HAha`) -- Chess960 is out of scope per issue #5;
+                                               rejected by name so a wider EPD suite in #6
+                                               gets a useful error rather than a confusing
+                                               one.
+    - halfmove clock consistency with the fullmove number -- not a chess rule.
+
+Rule:         Every rule `from_fen` deliberately does not enforce must have a test
+  asserting that a FEN violating it is ACCEPTED, so that the boundary is a choice on
+  record rather than an omission.
+
+Evidence:     `crates/boid-board/tests/fen_language.rs`.
+
+Consequences: Issue #5 inherits a written list of what it must add, and issue #6 knows
+  which rejections to expect when it feeds a wider suite in.
+
+---
+
+## D-0022 — `FenError` replaces `Result<(), String>`, and there is one parser
+
+Status:       Accepted
+Date:         2026-08-16
+
+Context:      D-0014 deferred to this issue: "`validate_fen` returns `Result<(), String>`.
+  An unmatchable error ... Correct for a fixture validator, wrong for the FEN reader issue
+  #4 will build on it: a caller that wants to branch on *why* a FEN was rejected cannot.
+  Deferred to #4, which should introduce a typed `FenError` and have this function return
+  it."
+
+Decision:     The deferral is closed. `fen::FenError` is a flat, `Copy`, scalar-payload
+  enum, and `oracle::validate_fen` becomes a delegate to `Board::from_fen`, so the
+  repository holds ONE FEN parser rather than two that can drift.
+
+  The delegation is only sound because the two callers want the same strictness. They do:
+  every rule in D-0021 is a rule a fixture row must also satisfy. The one property that
+  must survive is the four-field form -- the fixture stores Kiwipete that way and D-0008
+  forbids changing it.
+
+Rule:         `oracle::validate_fen` must accept a four-field FEN forever, and every
+  negative oracle test must name the specific `FenError` it expects rather than matching
+  `MalformedFen { .. }`.
+
+Evidence:     `crates/boid-board/tests/oracle_validation.rs`; collapsing every `FenError`
+  variant to one value reddens the negative tests rather than leaving them green.
+
+Consequences: A single parser means a strictness change is a single edit with a single
+  blast radius, and the oracle's rejections gain the diagnosis they lacked.
+
+---
+
+## D-0023 — The seam between issue #4 and issue #5, and the overlap this issue takes on
+
+Status:       Accepted
+Date:         2026-08-16
+
+Context:      Issue #4's body promises "an incrementally maintained zobrist key" and its
+  AC5 requires two positions "reached by different move orders". Neither is deliverable
+  without applying moves. Issue #5's body, however, says in as many words that "`apply_move`
+  is immutable copy-on-write and maintains the zobrist key incrementally, with a
+  `#[cfg(debug_assertions)]` recompute-from-scratch assertion at the end of every call",
+  and its AC3 names en-passant, castling-rights and promotion application tests.
+
+  The two issues therefore overlap, and the overlap has to be resolved somewhere. Resolving
+  it in #4's favour is a RE-SCOPE, and re-scoping silently is the failure this log exists
+  to prevent.
+
+Decision:     Issue #4 ships `Move`, `MoveKind`, UCI conversion, `Board::apply_move` for
+  all move kinds, `try_apply_move`, and `check_invariants`. The dividing sentence is:
+
+      move APPLICATION needs no attack tables; move GENERATION and LEGALITY need nothing
+      else.
+
+  Issue #4 therefore contains no attack table, no `attackers_to`, no `is_square_attacked`,
+  no check detection, no move generation, and no null move. Issue #5 retains all of those,
+  plus `cargo bench` and its no-`unsafe` criterion.
+
+  The alternative -- discharging AC5 with two `from_fen` calls and shipping no applier --
+  was rejected because it makes "reached by different move orders" a fiction: it asserts
+  that two identical FEN strings hash identically, which tests the parser, not the key.
+
+  Issue #5 AC2 (a `#[should_panic]` test that corrupts one XOR and proves the debug
+  assertion fires) becomes harder, because #4 lands the assertion rather than #5. #4
+  mitigates by shipping `check_invariants()` as a PUBLIC `Result`-returning method, so #5
+  can build a corrupted board by hand and assert on it without a corruption hook inside
+  `apply_move` -- a test-only mutation path is exactly what issue #6 AC6 forbids elsewhere.
+
+Rule:         Issue #4 ships no attack table, no move generation and no legality decision;
+  issue #5 ships no second `apply_move`. The overlap is reported on issue #5, not absorbed
+  in silence.
+
+Evidence:     A `repo-invariants` step asserts no function under `crates/` matches
+  `attack|attacker|is_check|square_attacked` until issue #5 lands.
+
+Consequences: D-0014's second deferral closes: issue #6's `PerftEngine::divide` now has an
+  expressible return type, `Result<Vec<(Move, u64)>, EngineError>`, because `Move` exists.
+
+---
+
+## D-0024 — Zobrist keys: splitmix64, published constants, a hardcoded seed, no seed search
+
+Status:       Accepted
+Date:         2026-08-16
+
+Context:      Issue #4: "Zobrist keys are generated by splitmix64 from a hardcoded seed in
+  a `const fn` -- never from entropy, because reproducible bug repros and reproducible
+  hashed-perft results are the whole point."
+
+Decision:     splitmix64 with Vigna's published constants -- increment
+  `0x9E3779B97F4A7C15`, multipliers `0xBF58476D1CE4E5B9` and `0x94D049BB133111EB`, shifts
+  30 / 27 / 31. Published constants rather than project-chosen ones, because they are what
+  makes the table regenerable by an outsider from the algorithm's name alone.
+
+  The seed is `u64::from_be_bytes(*b"boidbord")`, written as that expression rather than as
+  a hex literal so that its provenance is visible in the source. NO SEED SEARCH WAS
+  PERFORMED: no seed was tried, measured, and kept. A searched seed would make every
+  structural assertion about the key set (all distinct, none zero, no low-weight GF(2)
+  dependency) a fitted result rather than a property of the generator.
+
+  "Never from entropy" is proven structurally rather than behaviourally. The load-bearing
+  mechanism is `const _: [ZobristKey; KEY_COUNT] = build_table();` at item scope, which
+  forces compile-time evaluation of the whole table: entropy inside a `const fn` is a
+  COMPILE ERROR, not a test failure. A test that builds the table twice in one process and
+  compares is explicitly NOT relied upon -- it is green for a `OnceLock` seeded from
+  `getrandom`, which is the exact defect it appears to exclude.
+
+Rule:         Zobrist keys are produced by a `const fn` from a hardcoded seed; no seed may
+  be chosen by inspecting its output, and no runtime initialisation is permitted.
+
+Evidence:     `zobrist_table::splitmix64_matches_the_published_vectors` (vectors typed from
+  outside this project), the `const _` forcing item, `scripts/zobrist-reference.py` as an
+  independent derivation diffed in CI, and
+  `zobrist_digest::zobrist_keys_are_baked_into_the_binary`.
+
+Consequences: A bug repro from issue #6 quotes a key and the key means the same thing on
+  every machine, forever, including a machine that has never run this repository's tests.
