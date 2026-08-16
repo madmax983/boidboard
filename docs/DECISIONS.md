@@ -193,14 +193,26 @@ Decision:     No `target/` directory existed in the working tree at branch start
   exactly the class of dishonesty issue #3 exists to prevent.
 
   The AC does however contain one genuine defect. The inherited `.gitignore` used the
-  slashless, unanchored patterns `target` and `debug`. Unanchored patterns match FILES as
-  well as directories, at ANY depth -- so they would also have silently ignored a future
-  `crates/boid-board/src/target/mod.rs` or `docs/debug/`. In a chess engine, "target" and
-  "debug" are entirely plausible source-tree names. That is the real, latent form of the
-  bug AC7 gestures at, and it is fixed.
+  slashless patterns `target` and `debug`, which silently untrack source paths. Measured
+  with `git check-ignore` against a scratch repository:
 
-Rule:         Build-artifact ignore patterns must be directory-anchored (`target/`, not
-  `target`). Report AC7 as satisfied by invariant, never as work performed.
+      pattern     target/debug/x   src/target/mod.rs   crates/a/target/debug/x
+      target      ignored          IGNORED             ignored
+      target/     ignored          IGNORED             ignored
+      /target/    ignored          tracked             tracked
+
+  Note the middle row: a trailing slash restricts the pattern to DIRECTORIES but not to the
+  repository root, so `target/` still shadows `crates/boid-board/src/target/mod.rs`. Only
+  the LEADING slash does the work. This project uses `/target/` and `/debug/`.
+
+  Root-anchoring loses no coverage here because this is a cargo WORKSPACE: every build
+  writes to the root `target/` regardless of which member is built. It keeps `target` and
+  `debug` usable as source-tree names, which matters in a chess engine -- a search has a
+  target square, and a debug module is a debug module.
+
+Rule:         Build-artifact ignore patterns must be root-anchored (`/target/`, not
+  `target` and not `target/`). Report AC7 as satisfied by invariant, never as work
+  performed.
 
 Evidence:     Baseline capture before any change:
     `git ls-files | grep -c '^target/'`                     -> 0

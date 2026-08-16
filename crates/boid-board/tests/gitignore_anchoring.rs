@@ -25,11 +25,11 @@
 /// by failing to find the file.
 const GITIGNORE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.gitignore"));
 
-/// Patterns that name build-artifact *directories* and must therefore end in `/`.
+/// Build-artifact directory names that must be anchored to the repository root.
 const ARTIFACT_DIRS: [&str; 2] = ["target", "debug"];
 
 #[test]
-fn build_artifact_patterns_are_directory_anchored() {
+fn build_artifact_patterns_are_root_anchored() {
     let lines: Vec<&str> = GITIGNORE
         .lines()
         .map(str::trim)
@@ -37,18 +37,22 @@ fn build_artifact_patterns_are_directory_anchored() {
         .collect();
 
     for dir in ARTIFACT_DIRS {
+        // Measured with `git check-ignore` against a scratch repository:
+        //   "target"   ignores any file OR directory named target, at any depth
+        //   "target/"  ignores any DIRECTORY named target, at any depth -- still shadows
+        //              crates/boid-board/src/target/mod.rs
+        //   "/target/" ignores only the root build directory
+        // A trailing slash alone is not sufficient; the leading slash is what does the work.
+        for insufficient in [dir.to_owned(), format!("{dir}/")] {
+            assert!(
+                !lines.contains(&insufficient.as_str()),
+                "`.gitignore` contains {insufficient:?}, which still matches \
+                 `crates/boid-board/src/{dir}/mod.rs` at any depth. Use \"/{dir}/\"."
+            );
+        }
         assert!(
-            !lines.contains(&dir),
-            "`.gitignore` contains the unanchored pattern {dir:?}. An unanchored pattern \
-             matches files as well as directories at any depth, so it would also ignore \
-             `crates/boid-board/src/{dir}/mod.rs`. Use {:?} instead.",
-            format!("{dir}/")
-        );
-        assert!(
-            lines.contains(&format!("{dir}/").as_str()),
-            "`.gitignore` should ignore the build-artifact directory with the anchored \
-             pattern {:?}",
-            format!("{dir}/")
+            lines.contains(&format!("/{dir}/").as_str()),
+            "`.gitignore` should ignore the root build directory with \"/{dir}/\""
         );
     }
 }

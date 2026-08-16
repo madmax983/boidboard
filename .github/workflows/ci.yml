@@ -150,16 +150,21 @@ jobs:
           fi
           echo "fixture is ASCII-only"
 
-      - name: gitignore patterns are directory-anchored (D-0005)
+      - name: gitignore patterns are root-anchored (D-0005)
         run: |
           set -euo pipefail
+          # Behavioural, not textual: the textual half is a cargo test. A trailing slash
+          # alone restricts a pattern to directories but not to the root, so "target/"
+          # would still shadow a source path. Only the leading slash does that.
           git check-ignore -q target/debug/x \
             || { echo "target/debug/x should be ignored"; exit 1; }
-          if git check-ignore -q crates/boid-board/src/target/mod.rs; then
-            echo "An unanchored 'target' pattern is also ignoring source files."
-            exit 1
-          fi
-          echo "build-artifact patterns are directory-anchored"
+          for src in crates/boid-board/src/target/mod.rs docs/debug/notes.md; do
+            if git check-ignore -q "$src"; then
+              echo "gitignore is shadowing the source path $src"
+              exit 1
+            fi
+          done
+          echo "build-artifact patterns are root-anchored"
 
       - name: Cargo.lock is tracked (D-0013)
         run: |
