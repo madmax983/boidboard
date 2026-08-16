@@ -227,6 +227,31 @@ jobs:
           echo "pinned: $pinned"
           [ "$derived" = "$pinned" ]
 
+      - name: No attack tables or move generation until issue #5 (D-0023)
+        run: |
+          set -euo pipefail
+          # The #4/#5 seam, mechanically. Move APPLICATION needs no attack tables; move
+          # GENERATION and LEGALITY need nothing else. If a function matching these names
+          # appears before issue #5, the seam has moved and the decision log is stale.
+          if git grep -nE 'fn +(attackers_to|is_square_attacked|is_check|generate_[a-z_]*moves)' \
+               -- 'crates/*/src/*'; then
+            echo "D-0023 violated: attack or generation code landed before issue #5."
+            exit 1
+          fi
+          echo "no attack tables or move generation present"
+
+      - name: No unmake_move in the public API (issue #4 AC7)
+        run: |
+          set -euo pipefail
+          # Scoped to src/ deliberately. tests/board_layout.rs DEFINES these names in a
+          # blanket trait so that an inherent method would shadow them -- that test is how
+          # AC7 is proved, not a violation of it.
+          if git grep -nE 'fn +(unmake|unapply|undo|take_back)_?move' -- 'crates/*/src/*'; then
+            echo "AC7 violated: Board is Copy and must have no undo entry point."
+            exit 1
+          fi
+          echo "no unmake_move present"
+
       - name: Anti-theatre scan
         run: |
           set -euo pipefail

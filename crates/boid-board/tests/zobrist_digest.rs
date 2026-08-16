@@ -75,7 +75,7 @@ fn the_key_digest_is_pinned() {
 ///
 /// The two ways this test could pass without meaning anything are both closed explicitly.
 /// A mistyped filter makes libtest print `running 0 tests` and exit **0**, which is
-/// `#[ignore]` reconstructed out of exit codes — so the parent requires the child to
+/// a skipped test reconstructed out of exit codes — so the parent requires the child to
 /// report exactly one passing test. And a child that printed nothing would leave the
 /// comparison with nothing to compare, so the marker's absence is a panic rather than a
 /// skip.

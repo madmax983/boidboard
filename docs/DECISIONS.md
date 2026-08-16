@@ -971,3 +971,134 @@ Evidence:     `zobrist_table::splitmix64_matches_the_published_vectors` (vectors
 
 Consequences: A bug repro from issue #6 quotes a key and the key means the same thing on
   every machine, forever, including a machine that has never run this repository's tests.
+
+---
+
+## D-0025 — proptest is a dev-dependency, and the corpus is not a "legal position" corpus
+
+Status:       Accepted
+Date:         2026-08-16
+
+Context:      Issue #4 AC1 requires the round trip to hold "for all six perft positions plus
+  200 randomly generated legal positions (proptest)". Two things in that sentence needed
+  resolving: whether to take on a dependency in the crate whose manifest says it has none,
+  and whether this issue can produce a *legal* position at all.
+
+Decision:     **proptest is used**, because the customer named it. Replacing a named tool
+  with a hand-rolled loop would be this project choosing its own acceptance criteria, which
+  is precisely what D-0002 exists to prevent. It is a DEV-dependency, so:
+
+    - `cargo build --workspace` compiles none of it; the "zero external dependencies"
+      property the manifest claims is about `[dependencies]` and remains exactly true.
+    - the `repo-invariants` dependency-DAG diff filters to normal dependencies
+      (`select(.kind == null)`), so the declared DAG is unchanged.
+
+  Default features are OFF. They pull `rusty-fork`, `tempfile`, `rustix` and `wait-timeout`
+  for a fork-and-timeout harness this crate does not use; measured, turning them off takes
+  the transitive tree from 39 crates to 18.
+
+  The runner is seeded with `TestRng::deterministic_rng(RngAlgorithm::ChaCha)` rather than
+  from entropy, for the same reason the issue gives for the zobrist seed: a failure must
+  reproduce. `failure_persistence` is therefore `None` -- with a fixed seed the failing case
+  is regenerated on the next run rather than remembered in an untracked file.
+
+  **The corpus is not described as "legal".** Whether the side not to move is in check
+  cannot be decided without attack tables, which are issue #5's. The generated positions are
+  positions in the ACCEPTED LANGUAGE: structurally valid, two kings that do not touch, no
+  back-rank pawns, castling rights only where the king and rook are home, an en-passant file
+  only where a real double push could have left one. Reporting them as "200 random legal
+  positions" would be a claim this project cannot support.
+
+  The generator emits TEXT and never constructs a `Board`. A corpus produced by calling
+  `to_fen` would be by construction the set the parser accepts, and round-tripping it would
+  assert nothing about either half. That this matters is not hypothetical: on its first run
+  the generator and the parser disagreed, and the parser was right -- the generator had put
+  the square a double-pushed pawn came FROM one rank too far away.
+
+Rule:         `boid-board` takes no normal dependencies. Any dev-dependency must be named by
+  an acceptance criterion, declared with `default-features = false`, and seeded
+  deterministically. The generated corpus must not be reused as a perft corpus until issue
+  #5 can filter positions by check.
+
+Evidence:     `crates/boid-board/tests/fen_roundtrip.rs` asserts 200 cases and the coverage
+  buckets; `cargo tree` shows 18 crates; `cargo build --workspace` compiles none of them.
+
+Consequences: `cargo test` pays a one-off compile for 18 crates. `cargo build` pays nothing.
+
+---
+
+## D-0026 — The position type is `Board`, and `apply_move` may not produce an unrepresentable one
+
+Status:       Accepted
+Date:         2026-08-16
+
+Context:      D-0010's prose named the position type `Position`; issue #4 names it `Board`.
+  Separately, the random-walk guard found that `try_apply_move` accepted a pawn moving onto
+  the last rank without promoting, producing a board that `to_fen` would emit and
+  `from_fen` would reject.
+
+Decision:     The type is `Board`. D-0010's prose is superseded by number rather than
+  edited, since this log is append-only.
+
+  And the round trip is an INVARIANT of move application, not merely a property of parsing:
+  every board `apply_move` can produce must be readable back from its own FEN.
+  `MoveNotApplicable::PawnWouldNotPromote` is the missing precondition that makes it true.
+
+Rule:         The position type is `Board`. Every board `apply_move` can produce must
+  satisfy `from_fen(&b.to_fen()) == Ok(b)`.
+
+Evidence:     `board_apply::try_apply_move_rejects_structurally_impossible_moves`, and the
+  random walk, which asserts the FEN round trip at every ply of 500+ applied moves.
+
+Consequences: Issue #5's move generator cannot produce a non-promoting pawn move to the
+  last rank without `try_apply_move` rejecting it, which is a free correctness check on the
+  generator it is about to write.
+
+---
+
+## D-0027 — The measured register for issue #4
+
+Status:       Accepted
+Date:         2026-08-16
+
+Context:      D-0016 requires that a numeric claim about this project, made anywhere, be
+  asserted by a test if it is asserted at all. These are issue #4's numbers, each with the
+  test that holds it.
+
+Decision:     The register:
+
+    size_of::<Board>()          152 bytes, align 8, no padding
+                                board_layout::board_is_exactly_one_hundred_and_fifty_two_bytes
+                                and a const array-length item that fails at COMPILE time
+    zobrist key count           781 = 768 + 1 + 4 + 8
+                                zobrist_table::key_count_is_the_issues_arithmetic
+    zobrist table digest        31e98d78da31b5d7439ed0601a698f7ab6dc54499d3e0be77d3be645dee2a314
+                                zobrist_digest::the_key_digest_is_pinned, plus
+                                scripts/zobrist-reference.py diffed by CI
+    mean key population count   31.881, within a 28..=36 sanity band
+                                zobrist_table::the_mean_population_count_is_close_to_half_the_word
+    size_of::<Move>()           2 bytes
+    castling revocation squares six non-zero RIGHTS_LOST entries
+    generated corpus            exactly 200 cases, 190+ distinct, 8+ castling masks,
+                                4+ en-passant states, both sides, one clock >= 100
+                                fen_roundtrip::the_generated_corpus_round_trips_byte_identically
+    proptest transitive tree    18 crates with default features off (39 with them on)
+
+  Deferrals recorded rather than skipped, each with the issue that revisits it:
+
+    - side-not-to-move-in-check is not detected                         issue #5
+    - `PerftEngine::divide` is still not on the trait, but its return type is now
+      expressible as `Result<Vec<(Move, u64)>, EngineError>` because `Move` exists  issue #6
+    - repetition and fifty-move detection need a zobrist history threaded through the
+      search stack; `Board::key()` is public so that history can hold it     issues #8, #9
+    - Chess960 / Shredder castling notation is rejected by name             no owner yet
+    - the en-passant convention that records a square only when a capture is available is
+      implementable here and is deliberately not implemented, because the issue mandates
+      the other one and it is the conservative choice for hashed perft       issue #8
+
+Rule:         Every number in this register must remain asserted by the test named beside
+  it; a number that loses its test is deleted from the register in the same change.
+
+Evidence:     `cargo test --workspace` -- 167 tests.
+
+Consequences: Issue #5 inherits a written list of what it must add rather than a guess.
