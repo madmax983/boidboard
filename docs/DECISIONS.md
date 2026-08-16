@@ -358,6 +358,13 @@ Decision:     Edition 2024, `resolver = "3"`, MSRV `1.94`, and the toolchain pin
   `scripts/setup-toolchain.sh`, which retries with backoff and then fails loudly rather
   than letting the error surface inside an unrelated cargo command.
 
+  That step must run BEFORE `Swatinem/rust-cache`, not after. The cache action computes its
+  key from `rustc -vV`, and that invocation is itself what triggers the rustup download for
+  the pinned version — so ordered the other way round the retry sits downstream of the step
+  that actually fails. This is not a hypothetical: run 1's error was literally
+  `Command failed: rustc -vV`, raised inside the rust-cache step, and the first version of
+  this mitigation was placed after it and would not have helped.
+
 Rule:         Do not introduce `unsafe` outside `boid-board`, and do not introduce it there
   without a module-scoped allow and a `// SAFETY:` comment on every block. Every CI job
   that runs cargo must first run `scripts/setup-toolchain.sh`.

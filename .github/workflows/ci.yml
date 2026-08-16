@@ -30,9 +30,13 @@ jobs:
       BOIDBOARD_REQUIRE_STOCKFISH: "1"
     steps:
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      # Toolchain BEFORE the cache action: rust-cache computes its key from `rustc -vV`,
+      # which is itself what triggers the rustup download for the pinned version. Ordered
+      # the other way round, the retry script sits downstream of the step that actually
+      # fails -- which is exactly how CI run 1 died ("Command failed: rustc -vV").
       - name: Install pinned toolchain
         run: ./scripts/setup-toolchain.sh
+      - uses: Swatinem/rust-cache@v2
       - name: Install Stockfish
         run: ./scripts/setup-stockfish.sh
       - name: cargo build --workspace
@@ -48,9 +52,13 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      # Toolchain BEFORE the cache action: rust-cache computes its key from `rustc -vV`,
+      # which is itself what triggers the rustup download for the pinned version. Ordered
+      # the other way round, the retry script sits downstream of the step that actually
+      # fails -- which is exactly how CI run 1 died ("Command failed: rustc -vV").
       - name: Install pinned toolchain
         run: ./scripts/setup-toolchain.sh
+      - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   # `cargo fmt` without --check rewrites files and exits 0 unconditionally: it can never
@@ -75,9 +83,13 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      # Toolchain BEFORE the cache action: rust-cache computes its key from `rustc -vV`,
+      # which is itself what triggers the rustup download for the pinned version. Ordered
+      # the other way round, the retry script sits downstream of the step that actually
+      # fails -- which is exactly how CI run 1 died ("Command failed: rustc -vV").
       - name: Install pinned toolchain
         run: ./scripts/setup-toolchain.sh
+      - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --locked
 
   # Git- and repository-shape assertions. Deliberately a shell job, not a cargo test:
