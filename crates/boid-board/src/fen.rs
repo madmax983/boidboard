@@ -31,7 +31,10 @@
 use core::fmt;
 use core::str::FromStr;
 
-use crate::board::{Board, CastlingRights, Color, Square};
+use crate::board::{
+    Board, CastlingRights, Color, File, MAX_FULLMOVE_NUMBER, MAX_HALFMOVE_CLOCK, Piece, PieceKind,
+    Square,
+};
 
 /// Which FEN field a rejection came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -287,8 +290,74 @@ impl Board {
     /// any input at all — that is asserted over generated garbage as well as over hand-
     /// written cases.
     pub fn from_fen(fen: &str) -> Result<Self, FenError> {
-        let _ = fen;
-        todo!("Board::from_fen")
+        if fen.is_empty() {
+            return Err(FenError::Empty);
+        }
+        // Before anything else: a non-ASCII byte is rejected rather than normalised, so a
+        // U+00A0-separated FEN cannot reach the field split and be silently accepted
+        // (D-0008). `bytes().position` gives the offset in bytes, which is what a reader
+        // staring at a hex dump wants.
+        if let Some(offset) = fen.bytes().position(|b| !b.is_ascii()) {
+            return Err(FenError::NonAscii { offset });
+        }
+
+        // split(' '), never split_whitespace: the latter would silently re-admit the
+        // separators the check above exists to reject, and would also swallow the empty
+        // fields that a doubled or leading space produces.
+        let fields: Vec<&str> = fen.split(' ').collect();
+        let six = match fields.len() {
+            4 => false,
+            6 => true,
+            found => return Err(FenError::WrongFieldCount { found }),
+        };
+
+        for (field, name) in [
+            (fields[0], FenField::Placement),
+            (fields[1], FenField::SideToMove),
+            (fields[2], FenField::Castling),
+            (fields[3], FenField::EnPassant),
+        ] {
+            if field.is_empty() {
+                return Err(FenError::EmptyField { field: name });
+            }
+        }
+
+        let mut board = Self::blank();
+        parse_placement(&mut board, fields[0])?;
+
+        let side = match fields[1] {
+            "w" => Color::White,
+            "b" => Color::Black,
+            _ => return Err(FenError::BadSideToMove),
+        };
+
+        let rights = parse_castling(&board, fields[2])?;
+        let ep = parse_en_passant(&board, fields[3], side)?;
+
+        let (halfmove, fullmove) = if six {
+            for (field, name) in [
+                (fields[4], FenField::HalfmoveClock),
+                (fields[5], FenField::FullmoveNumber),
+            ] {
+                if field.is_empty() {
+                    return Err(FenError::EmptyField { field: name });
+                }
+            }
+            let halfmove = parse_number(fields[4], FenField::HalfmoveClock, MAX_HALFMOVE_CLOCK)?;
+            let fullmove = parse_number(fields[5], FenField::FullmoveNumber, MAX_FULLMOVE_NUMBER)?;
+            if fullmove == 0 {
+                return Err(FenError::FullmoveNumberIsZero);
+            }
+            (halfmove, fullmove)
+        } else {
+            // The four-field abbreviation D-0008 stores Kiwipete in. The defaults are the
+            // values Stockfish itself supplies when fed the same four fields, so the
+            // expansion is corroborated rather than invented (D-0020).
+            (0, 1)
+        };
+
+        board.set_state(side, rights, ep, halfmove, fullmove);
+        Ok(board)
     }
 
     /// Emit the canonical six-field FEN.
@@ -310,5 +379,201 @@ impl fmt::Display for Board {
     /// The canonical six-field FEN.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.to_fen())
+    }
+}
+
+/// Fill `board`'s pieces from a FEN placement field.
+fn parse_placement(board: &mut Board, placement: &str) -> Result<(), FenError> {
+    let ranks: Vec<&str> = placement.split('/').collect();
+    if ranks.len() != 8 {
+        return Err(FenError::WrongRankCount { found: ranks.len() });
+    }
+
+    for (index, text) in ranks.iter().enumerate() {
+        // FEN writes rank 8 first, so the zero-based rank counts down.
+        let rank = 7 - index as u8;
+        let label = rank + 1;
+        let mut file = 0u32;
+        let mut previous_was_digit = false;
+
+        for ch in text.chars() {
+            if ch.is_ascii_digit() {
+                if !('1'..='8').contains(&ch) {
+                    return Err(FenError::BadSkipDigit {
+                        found: ch,
+                        rank: label,
+                    });
+                }
+                if previous_was_digit {
+                    return Err(FenError::ConsecutiveSkipDigits { rank: label });
+                }
+                previous_was_digit = true;
+                file += ch as u32 - '0' as u32;
+                continue;
+            }
+            previous_was_digit = false;
+
+            let piece = Piece::from_fen_char(ch).ok_or(FenError::BadPieceChar {
+                found: ch,
+                rank: label,
+            })?;
+            // Placing beyond the eighth file is caught by the file-count check below, but
+            // the square has to exist before then, so bail here rather than index badly.
+            let Some(file_index) = File::new(file as u8) else {
+                return Err(FenError::WrongFileCount {
+                    rank: label,
+                    found: file + 1,
+                });
+            };
+            let Some(square) = Square::new(file_index, rank) else {
+                return Err(FenError::WrongFileCount {
+                    rank: label,
+                    found: file + 1,
+                });
+            };
+            if piece.kind() == PieceKind::Pawn && (rank == 0 || rank == 7) {
+                return Err(FenError::PawnOnBackRank { square });
+            }
+            board.toggle(piece, square);
+            file += 1;
+        }
+
+        if file != 8 {
+            return Err(FenError::WrongFileCount {
+                rank: label,
+                found: file,
+            });
+        }
+    }
+
+    for color in Color::ALL {
+        let kings = board.pieces_colored(PieceKind::King, color).count();
+        if kings != 1 {
+            return Err(FenError::WrongKingCount {
+                color,
+                found: kings,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Parse the castling field, checking each claimed right against the pieces on the board.
+fn parse_castling(board: &Board, field: &str) -> Result<CastlingRights, FenError> {
+    if field == "-" {
+        return Ok(CastlingRights::NONE);
+    }
+
+    let mut rights = CastlingRights::NONE;
+    let mut last_rank = 0usize;
+    for ch in field.chars() {
+        let (right, order) = match ch {
+            'K' => (CastlingRights::WHITE_KING, 1),
+            'Q' => (CastlingRights::WHITE_QUEEN, 2),
+            'k' => (CastlingRights::BLACK_KING, 3),
+            'q' => (CastlingRights::BLACK_QUEEN, 4),
+            _ => return Err(FenError::BadCastlingChar { found: ch }),
+        };
+        if rights.contains(right) {
+            return Err(FenError::RepeatedCastlingRight { found: ch });
+        }
+        if order < last_rank {
+            return Err(FenError::NonCanonicalCastlingOrder);
+        }
+        last_rank = order;
+        rights = rights.with(right);
+    }
+
+    // A right with no rook behind it is the commonest transcription damage there is, and
+    // it silently changes move generation in issue #5. Standard chess only: Chess960's
+    // castling is out of scope, which is what licenses assuming these home squares.
+    for right in CastlingRights::EACH {
+        if !rights.contains(right) {
+            continue;
+        }
+        let (king_square, rook_square, color) = castling_home_squares(right);
+        let king = Some(Piece::new(color, PieceKind::King));
+        let rook = Some(Piece::new(color, PieceKind::Rook));
+        if board.piece_at(king_square) != king || board.piece_at(rook_square) != rook {
+            return Err(FenError::CastlingRightWithoutPieces { right });
+        }
+    }
+    Ok(rights)
+}
+
+/// Parse the en-passant field into the file the board stores (D-0019).
+fn parse_en_passant(board: &Board, field: &str, side: Color) -> Result<Option<File>, FenError> {
+    if field == "-" {
+        return Ok(None);
+    }
+    let square = Square::from_uci(field).ok_or(FenError::BadEnPassantSquare)?;
+    if square.rank() != 2 && square.rank() != 5 {
+        return Err(FenError::BadEnPassantSquare);
+    }
+
+    // The rank follows from the side to move: after White pushes two squares the target is
+    // on rank 3 and it is Black's turn. Decidable without looking at a piece.
+    let expected_rank = match side {
+        Color::White => 5,
+        Color::Black => 2,
+    };
+    if square.rank() != expected_rank {
+        return Err(FenError::EnPassantRankContradictsSideToMove { square });
+    }
+
+    // And the double push must actually have been available: the target empty, the pawn
+    // that made it standing beyond the target, and the square it left empty.
+    let mover = side.flip();
+    // Which way the pusher was travelling. White pushed e2-e4 and left the pawn one rank
+    // ABOVE the e3 target; Black pushed e7-e5 and left it one rank BELOW the e6 target.
+    let (to_pawn, to_origin) = match mover {
+        Color::White => (1i8, -1i8),
+        Color::Black => (-1i8, 1i8),
+    };
+    let pawn_square = square
+        .offset_rank(to_pawn)
+        .ok_or(FenError::EnPassantNotReachable { square })?;
+    let origin = square
+        .offset_rank(to_origin)
+        .ok_or(FenError::EnPassantNotReachable { square })?;
+    let pawn = Some(Piece::new(mover, PieceKind::Pawn));
+    if board.piece_at(square).is_some()
+        || board.piece_at(origin).is_some()
+        || board.piece_at(pawn_square) != pawn
+    {
+        return Err(FenError::EnPassantNotReachable { square });
+    }
+
+    Ok(Some(square.file()))
+}
+
+/// Parse one of the two numeric fields.
+fn parse_number(field: &str, name: FenField, max: u16) -> Result<u16, FenError> {
+    if field.is_empty() || !field.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(FenError::BadNumber { field: name });
+    }
+    // Canonical FEN has no leading zeros, and accepting them would break the round-trip
+    // law: "01" parses to 1 and emits as "1".
+    if field.len() > 1 && field.starts_with('0') {
+        return Err(FenError::LeadingZero { field: name });
+    }
+    field
+        .parse::<u32>()
+        .ok()
+        .filter(|value| *value <= u32::from(max))
+        .and_then(|value| u16::try_from(value).ok())
+        .ok_or(FenError::NumberOutOfRange { field: name })
+}
+
+/// The king's and rook's home squares for a castling right, and whose right it is.
+fn castling_home_squares(right: CastlingRights) -> (Square, Square, Color) {
+    if right == CastlingRights::WHITE_KING {
+        (Square::E1, Square::H1, Color::White)
+    } else if right == CastlingRights::WHITE_QUEEN {
+        (Square::E1, Square::A1, Color::White)
+    } else if right == CastlingRights::BLACK_KING {
+        (Square::E8, Square::H8, Color::Black)
+    } else {
+        (Square::E8, Square::A8, Color::Black)
     }
 }

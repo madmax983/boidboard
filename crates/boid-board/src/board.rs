@@ -790,6 +790,81 @@ impl Board {
         }
     }
 
+    /// A board with no pieces, White to move, no rights, no en-passant file, clock 0 and
+    /// move number 1.
+    ///
+    /// Not public: it has no kings, so it fails [`Board::check_invariants`]. It exists as
+    /// the starting point the FEN parser fills in.
+    pub(crate) fn blank() -> Self {
+        Self {
+            pieces: [Bitboard::EMPTY; 6],
+            colors: [Bitboard::EMPTY; 2],
+            mailbox: [None; Square::COUNT],
+            key: ZobristKey::ZERO,
+            pawn_key: PawnKey::ZERO,
+            state: 1 << FULLMOVE_SHIFT | NO_EN_PASSANT << EN_PASSANT_SHIFT,
+        }
+    }
+
+    /// Add or remove `piece` on `square`, keeping the bitboards, the mailbox and both keys
+    /// in step.
+    ///
+    /// The single place any of those four is written, which is what makes them able to
+    /// disagree only through a bug in this function rather than through a bug in any
+    /// caller.
+    pub(crate) fn toggle(&mut self, piece: Piece, square: Square) {
+        let kind = piece.kind().index();
+        let color = piece.color().index();
+        if self.mailbox[square.index()].is_some() {
+            self.pieces[kind] = self.pieces[kind].without(square);
+            self.colors[color] = self.colors[color].without(square);
+            self.mailbox[square.index()] = None;
+        } else {
+            self.pieces[kind] = self.pieces[kind].with(square);
+            self.colors[color] = self.colors[color].with(square);
+            self.mailbox[square.index()] = Some(piece);
+        }
+        let key = zobrist::piece_square(piece, square);
+        self.key ^= key;
+        if piece.is_pawn() {
+            self.pawn_key ^= key;
+        }
+    }
+
+    /// Set the packed state fields and fold their zobrist contribution into the key.
+    ///
+    /// Used by the FEN parser, which builds a board by placing pieces and then declaring
+    /// the state once.
+    pub(crate) fn set_state(
+        &mut self,
+        side: Color,
+        rights: CastlingRights,
+        ep: Option<File>,
+        halfmove: u16,
+        fullmove: u16,
+    ) {
+        // Remove the old contribution before installing the new one, so this is idempotent
+        // rather than only correct on a blank board.
+        self.key ^= zobrist::castling(self.castling());
+        self.key ^= zobrist::en_passant(self.ep_file());
+        if self.side_to_move() == Color::Black {
+            self.key ^= zobrist::side_to_move();
+        }
+
+        let ep_nibble = ep.map_or(NO_EN_PASSANT, |f| f.index() as u64);
+        self.state = (side as u64) << SIDE_TO_MOVE_SHIFT
+            | u64::from(rights.bits()) << CASTLING_SHIFT
+            | ep_nibble << EN_PASSANT_SHIFT
+            | u64::from(halfmove) << HALFMOVE_SHIFT
+            | u64::from(fullmove) << FULLMOVE_SHIFT;
+
+        self.key ^= zobrist::castling(rights);
+        self.key ^= zobrist::en_passant(ep);
+        if side == Color::Black {
+            self.key ^= zobrist::side_to_move();
+        }
+    }
+
     /// The piece standing on `square`, if any.
     #[must_use]
     pub const fn piece_at(&self, square: Square) -> Option<Piece> {
