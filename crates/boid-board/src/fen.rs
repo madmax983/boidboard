@@ -382,6 +382,14 @@ impl fmt::Display for Board {
     }
 }
 
+/// The longest FEN this crate can emit.
+///
+/// 71 placement bytes at most (64 piece letters plus 7 separators), one side letter, four
+/// castling letters, two en-passant letters, five halfmove digits, five fullmove digits and
+/// five spaces: 94. Used only to size the emitter's buffer, so an over-estimate costs
+/// nothing and an under-estimate costs one reallocation.
+pub const MAX_FEN_LEN: usize = 94;
+
 /// Fill `board`'s pieces from a FEN placement field.
 fn parse_placement(board: &mut Board, placement: &str) -> Result<(), FenError> {
     let ranks: Vec<&str> = placement.split('/').collect();
