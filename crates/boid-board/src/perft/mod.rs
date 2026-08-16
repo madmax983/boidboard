@@ -10,4 +10,5 @@
 //! process, which is issue #6's differential harness with our own engine side still
 //! absent.
 
+pub mod engine;
 pub mod oracle;
