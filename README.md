@@ -102,6 +102,9 @@ issue #3 requires be recorded: none of the archived prior attempt's code may be 
 (D-0001), and this project may not author its own acceptance criteria in-repo before the
 perft harness is green (D-0002).
 
+`docs/TRAINER.md` designs a later-phase opening/tactics/theory trainer, and records the one
+thing it needs from phase 1 that no issue currently covers: SAN and PGN I/O (D-0018).
+
 ## Licence
 
 MIT. See `LICENSE`.

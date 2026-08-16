@@ -682,3 +682,67 @@ Evidence:     `git ls-remote --tags origin` returns nothing. Locally,
 Consequences: The `repo-invariants` job enforces the tag's target the moment it exists and
   warns until then. Quarantine enforcement (D-0001) is unaffected: it keys off the commit
   SHA, so it is live today.
+
+---
+
+## D-0018 — The trainer is roadmap, and SAN/PGN are its phase-1 prerequisite
+
+Status:       Accepted
+Date:         2026-08-16
+
+Context:      The customer asked for an opening / tactics / theory trainer, describing it as
+  "not in engine territory" and "easy to build once we have all the movement/stuff built".
+  The first half is right; the second half is conditional, and the condition is not met by
+  the issues as written. A trainer's content is SAN inside PGN -- repertoires are PGN with
+  variations, published theory and puzzle solutions are SAN, Lichess studies export as PGN.
+  Issue #4 covers FEN and Zobrist; #5 and #6 cover generation and legality. **No issue
+  covers SAN or PGN at all.** Coordinate notation is not a substitute: no existing content
+  is written in it.
+
+  SAN also has a natural moment. Emitting it requires disambiguation and check/mate
+  suffixes, both of which are questions about the legal move list, so it sits directly on
+  top of #6 -- a small addition to a component whose correctness has just been established
+  against an external oracle, or a change to the move layer with the whole engine standing
+  on it. The same choice, six phases apart.
+
+Decision:     The trainer is accepted onto the roadmap as a later phase and designed in
+  `docs/TRAINER.md`. Its acceptance criteria are NOT in that document: they are in its
+  GitHub issues, because D-0002 forbids in-repo self-authored acceptance criteria until
+  perft is green, and issues are upstream of the repository.
+
+  SAN and PGN I/O are scoped as their own phase-1 issue landing after #6, rather than by
+  editing #4's or #6's acceptance criteria, which are the customer's.
+
+  Crate placement is recommended (`boid-train` -> `boid-board`, `boid-search`) and
+  deliberately not executed. The `repo-invariants` job asserts the workspace members are
+  exactly the seven crates issue #3 names and diffs the DAG against
+  `.github/expected-dep-edges.txt`; an eighth crate amends a CI-enforced invariant, which
+  is not a side effect of a feature request.
+
+  No trainer code is written now. The scheduler and session state machine are genuinely
+  move-agnostic and buildable today, but the boundary types -- how a card names a position,
+  how an attempt names a move -- are exactly the ones that would be guessed wrong, and
+  every other part touches them. This is the argument D-0010 made for `Evaluator` and
+  D-0014 made for perft divide, applied a third time.
+
+Rule:         The trainer must not carry its own move notation: SAN and PGN I/O belong in
+  `boid-board` and land in phase 1. No eighth workspace crate may be added without an entry
+  superseding this one.
+
+Evidence:     The prerequisite table in `docs/TRAINER.md`, checked against the full text of
+  all fifteen issues on 2026-08-16, not against their titles. "SAN" appears in none of them;
+  the move layer is coordinate-notation throughout (#5 and #7 both fix castling as `e1g1`).
+  "PGN" appears only in #7 and #10, both times as an artefact of the external arbiter --
+  fastchess's `8moves_v3.pgn` book and the match PGN a human reads -- never as something
+  boidboard parses or emits. Re-checkable with:
+      gh issue list --state all --limit 100 --json number,body \
+        | jq -r '.[] | select(.body | test("SAN|PGN")) | .number'
+
+Consequences: Phase 1 gains a small addition, proptest-able exactly as #4's AC1 is for FEN.
+  Note what it does NOT get: Stockfish speaks UCI coordinate notation and emits no SAN at
+  all, so the existing differential harness does not extend to it. SAN's oracle is a
+  published PGN corpus round-tripped byte-for-byte -- parse, play, re-emit, diff -- which is
+  the perft fixture's posture applied to notation and can likewise be committed before the
+  code that must satisfy it. The trainer, in return, gets to be the cheap part the customer
+  expects. Deferring SAN would not remove this work; it would move it under a load-bearing
+  engine.
