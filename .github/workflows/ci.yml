@@ -212,7 +212,13 @@ jobs:
           echo "Cargo.lock is tracked and pins autumn-web 0.6.x / autumn-harvest 0.5.x"
 
       - name: Anti-theatre scan
-        run: ./scripts/anti-theatre.sh
+        run: |
+          set -euo pipefail
+          # Prove the scanner can fail before trusting it to say the tree is clean. A
+          # scanner nobody has seen fire is indistinguishable from one that matches
+          # nothing -- and the self-test caught a real hole in this very script.
+          ./scripts/anti-theatre.sh --selftest
+          ./scripts/anti-theatre.sh
 
       - name: Quarantine — no archived code may re-enter the tree (D-0001)
         run: |
