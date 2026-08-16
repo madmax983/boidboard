@@ -121,6 +121,12 @@ pub enum MoveNotApplicable {
     NotAPromotion,
     /// A double push that is not a pawn's, is not from the pawn's home rank, or is blocked.
     NotADoublePush,
+    /// A pawn move onto the last rank that does not promote.
+    ///
+    /// Its own variant because the board it would produce is not FEN-representable at all:
+    /// `from_fen` rejects a pawn on rank 1 or 8, so allowing this would let `apply_move`
+    /// build a position that `to_fen` could emit and `from_fen` could not read back.
+    PawnWouldNotPromote,
 }
 
 impl fmt::Display for MoveNotApplicable {
@@ -142,6 +148,11 @@ impl fmt::Display for MoveNotApplicable {
             Self::CastlingPathOccupied => write!(f, "the castling path is not empty"),
             Self::NotAPromotion => write!(f, "that move does not promote"),
             Self::NotADoublePush => write!(f, "that move is not an available double push"),
+            Self::PawnWouldNotPromote => write!(
+                f,
+                "a pawn reaching the last rank must promote; the resulting position would \
+                 otherwise not be representable as a FEN"
+            ),
         }
     }
 }
@@ -525,6 +536,15 @@ impl Board {
             Color::White => 7,
             Color::Black => 0,
         };
+
+        // Checked before the per-kind rules, because it is a property of the RESULT rather
+        // than of the move: every board apply_move can produce must round-trip through FEN.
+        if piece.kind() == PieceKind::Pawn
+            && (mv.to().rank() == 0 || mv.to().rank() == 7)
+            && !mv.is_promotion()
+        {
+            return Err(MoveNotApplicable::PawnWouldNotPromote);
+        }
 
         match kind {
             MoveKind::Quiet if destination.is_some() => return disagrees,

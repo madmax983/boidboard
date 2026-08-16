@@ -415,6 +415,21 @@ fn try_apply_move_rejects_structurally_impossible_moves() {
         Err(MoveNotApplicable::OwnPieceOnDestination)
     );
 
+    // A pawn reaching the last rank must promote: the board it would otherwise produce is
+    // not FEN-representable, so apply_move could build a position from_fen cannot read.
+    // Found by the random walk, which reached "2p1k1R1/..." with a black pawn on c8.
+    let pawn = Board::from_fen("4k3/8/8/8/8/8/6P1/4K3 w - - 0 1").expect("parses");
+    let mv = Move::new(
+        Square::from_uci("g2").expect("a square"),
+        Square::from_uci("g8").expect("a square"),
+        MoveKind::Quiet,
+    )
+    .expect("distinct squares");
+    assert_eq!(
+        pawn.try_apply_move(mv),
+        Err(MoveNotApplicable::PawnWouldNotPromote)
+    );
+
     // Castling with no right available.
     let bare = Board::from_fen("4k3/8/8/8/8/8/8/4K2R w - - 0 1").expect("parses");
     let mv = Move::new(
