@@ -79,6 +79,14 @@ pub enum OracleError {
         /// Number of `|`-separated fields actually found.
         fields: usize,
     },
+    /// A depth token was not of the form `depth:nodes<flag>`, or its depth was not a
+    /// number.
+    MalformedCountToken {
+        /// 1-based line number in the fixture.
+        line: usize,
+        /// The offending token, verbatim.
+        token: String,
+    },
     /// A node count contained a byte that is not an ASCII digit.
     NonNumericCount {
         /// 1-based line number in the fixture.
@@ -147,6 +155,10 @@ impl fmt::Display for OracleError {
                 f,
                 "line {line}: expected 3 '|'-separated fields (id | fen | counts), found {fields}"
             ),
+            Self::MalformedCountToken { line, token } => write!(
+                f,
+                "line {line}: token {token:?} must be of the form depth:nodes<flag>"
+            ),
             Self::NonNumericCount { line, token } => {
                 write!(
                     f,
@@ -195,6 +207,111 @@ impl Error for OracleError {}
 /// header: wrong field count, a non-numeric or oversized node count, a missing provenance
 /// flag, duplicate or non-contiguous depths, a duplicate id, or a structurally invalid FEN.
 pub fn parse(text: &str) -> Result<Vec<PerftCase<'_>>, OracleError> {
-    let _ = text;
-    todo!("oracle::parse is not implemented yet")
+    let mut cases: Vec<PerftCase<'_>> = Vec::new();
+
+    for (index, raw) in text.lines().enumerate() {
+        let line = index + 1;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let fields: Vec<&str> = trimmed.split('|').map(str::trim).collect();
+        if fields.len() != 3 {
+            return Err(OracleError::MalformedLine {
+                line,
+                fields: fields.len(),
+            });
+        }
+        let (id, fen, counts_field) = (fields[0], fields[1], fields[2]);
+
+        if cases.iter().any(|c| c.id == id) {
+            return Err(OracleError::DuplicateId {
+                line,
+                id: id.to_owned(),
+            });
+        }
+
+        let counts = parse_counts(line, counts_field)?;
+        if counts.is_empty() {
+            return Err(OracleError::NoCounts { line });
+        }
+
+        cases.push(PerftCase { id, fen, counts });
+    }
+
+    if cases.is_empty() {
+        return Err(OracleError::NoEntries);
+    }
+    Ok(cases)
+}
+
+/// Parse one position's whitespace-separated `depth:nodes<flag>` tokens.
+///
+/// Depths must be ascending and contiguous with no duplicates: a gap means a published
+/// row was dropped in transcription, which is exactly the kind of quiet omission this
+/// fixture exists to prevent.
+fn parse_counts(line: usize, field: &str) -> Result<Vec<DepthCount>, OracleError> {
+    let mut counts: Vec<DepthCount> = Vec::new();
+
+    for token in field.split_whitespace() {
+        let malformed = || OracleError::MalformedCountToken {
+            line,
+            token: token.to_owned(),
+        };
+
+        let (depth_str, remainder) = token.split_once(':').ok_or_else(malformed)?;
+        if depth_str.is_empty() || !depth_str.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(malformed());
+        }
+        let depth: u32 = depth_str.parse().map_err(|_| malformed())?;
+
+        // The provenance flag is the final byte. Its absence is an error rather than a
+        // default: an unflagged count would silently claim whichever trust level the
+        // reader assumed.
+        let flag = remainder.chars().next_back().ok_or_else(malformed)?;
+        let provenance = match flag {
+            'v' => Provenance::Verified,
+            'p' => Provenance::Published,
+            _ => {
+                return Err(OracleError::MissingProvenanceFlag {
+                    line,
+                    token: token.to_owned(),
+                });
+            }
+        };
+        let digits = &remainder[..remainder.len() - flag.len_utf8()];
+
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(OracleError::NonNumericCount {
+                line,
+                token: token.to_owned(),
+            });
+        }
+        let nodes: u64 = digits.parse().map_err(|_| OracleError::CountOverflowsU64 {
+            line,
+            token: token.to_owned(),
+        })?;
+
+        if counts.iter().any(|c| c.depth == depth) {
+            return Err(OracleError::DuplicateDepth { line, depth });
+        }
+        if let Some(previous) = counts.last().map(|c| c.depth)
+            && depth != previous + 1
+        {
+            return Err(OracleError::DepthGap {
+                line,
+                previous,
+                found: depth,
+            });
+        }
+
+        counts.push(DepthCount {
+            depth,
+            nodes,
+            provenance,
+        });
+    }
+
+    Ok(counts)
 }
