@@ -710,8 +710,8 @@ Decision:     The trainer is accepted onto the roadmap as a later phase and desi
   GitHub issues, because D-0002 forbids in-repo self-authored acceptance criteria until
   perft is green, and issues are upstream of the repository.
 
-  SAN and PGN I/O are scoped as their own phase-1 issue landing after #6, rather than by
-  editing #4's or #6's acceptance criteria, which are the customer's.
+  SAN and PGN I/O are scoped as #19, a phase-1 issue landing after #6, rather than by
+  editing #4's or #6's acceptance criteria, which are the customer's. The trainer is #20.
 
   Crate placement is recommended (`boid-train` -> `boid-board`, `boid-search`) and
   deliberately not executed. The `repo-invariants` job asserts the workspace members are

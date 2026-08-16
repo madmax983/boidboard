@@ -145,8 +145,8 @@ factual, falsifiable, and committed before the code that must satisfy it. A prop
 generated legal positions, as #4's AC1 does for FEN, covers the rare shapes a corpus is
 thin on — under-promotions, double-disambiguation — and the two together are cheap.
 
-This is tracked as its own phase-1 issue rather than by editing #4 or #6, whose acceptance
-criteria are the customer's.
+This is tracked as **#19**, its own phase-1 issue, rather than by editing #4 or #6, whose
+acceptance criteria are the customer's. The trainer itself is **#20**.
 
 ## The data model
 
