@@ -8,6 +8,8 @@
 
 use core::fmt;
 
+use crate::zobrist::{self, PawnKey, ZobristKey};
+
 // ---------------------------------------------------------------------------------
 // Colour
 // ---------------------------------------------------------------------------------
@@ -590,3 +592,514 @@ impl Iterator for BitboardIter {
 }
 
 impl ExactSizeIterator for BitboardIter {}
+
+// ---------------------------------------------------------------------------------
+// The packed state word
+// ---------------------------------------------------------------------------------
+
+/// Bit 0 of [`Board::state_word`]: the side to move, `0` White and `1` Black.
+pub const SIDE_TO_MOVE_SHIFT: u32 = 0;
+/// Bits 1..=4: the castling rights.
+pub const CASTLING_SHIFT: u32 = 1;
+/// Bits 5..=8: the en-passant file, `0..=7` for `a..h` and [`NO_EN_PASSANT`] for none.
+pub const EN_PASSANT_SHIFT: u32 = 5;
+/// Bits 9..=24: the halfmove clock.
+pub const HALFMOVE_SHIFT: u32 = 9;
+/// Bits 25..=40: the fullmove number.
+pub const FULLMOVE_SHIFT: u32 = 41 - 16;
+/// The en-passant nibble's "no file" value. `8..=15` are otherwise unused.
+pub const NO_EN_PASSANT: u64 = 8;
+
+/// The bits of [`Board::state_word`] the zobrist key reads, and no others.
+///
+/// Side to move, castling rights and en-passant file — nine bits. The halfmove clock and
+/// the fullmove number are deliberately outside it: a key that included them would make
+/// every transposition-table probe miss, and no perft count at any depth would notice.
+/// That the key depends on exactly these bits is asserted exhaustively over all 4,608
+/// legal state words rather than argued.
+pub const POSITION_MASK: u64 = 0x1FF;
+
+/// The largest halfmove clock the packed word can hold.
+pub const MAX_HALFMOVE_CLOCK: u16 = u16::MAX;
+/// The largest fullmove number the packed word can hold.
+pub const MAX_FULLMOVE_NUMBER: u16 = u16::MAX;
+
+// ---------------------------------------------------------------------------------
+// Board
+// ---------------------------------------------------------------------------------
+
+/// A chess position: the piece placement plus everything else a FEN records.
+///
+/// `Copy`, and 152 bytes. There is deliberately **no `unmake_move`**: [`apply_move`] takes
+/// `self` by value and returns a new board, so there is no undo stack and no aliasing
+/// between a parent and a child node.
+///
+/// The consequence is worth stating plainly, because engines get it wrong and no unit test
+/// catches it: with no undo stack there is no natural place to look up whether a position
+/// has occurred before. Repetition and fifty-move detection therefore require a zobrist
+/// history **threaded separately through the search stack** (issues #8 and #9). [`key`]
+/// exists to be the value that history holds.
+///
+/// [`apply_move`]: Board::apply_move
+/// [`key`]: Board::key
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Board {
+    /// One bitboard per piece kind, both colours together.
+    pieces: [Bitboard; 6],
+    /// One bitboard per colour.
+    colors: [Bitboard; 2],
+    /// Redundant piece-on-square lookup. Kept in step with the bitboards by construction;
+    /// [`Board::check_invariants`] is what proves it.
+    mailbox: [Option<Piece>; Square::COUNT],
+    /// The incrementally maintained position key.
+    key: ZobristKey,
+    /// The incrementally maintained pawn-structure key.
+    pawn_key: PawnKey,
+    /// Side to move, castling rights, en-passant file, halfmove clock, fullmove number.
+    state: u64,
+}
+
+/// A way in which a [`Board`]'s redundant representations can disagree.
+///
+/// Public and `Result`-returning on purpose: issue #5's acceptance criterion 2 needs to
+/// prove that a corrupted board is detected, and it can do so by building one by hand and
+/// calling [`Board::check_invariants`] — rather than by a test-only corruption hook inside
+/// `apply_move`, which is the kind of test-only path issue #6 forbids elsewhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardInvariant {
+    /// The union of the colour bitboards is not the union of the piece bitboards.
+    OccupancyDisagrees,
+    /// A square is in both colour bitboards.
+    ColorsOverlap {
+        /// The offending square.
+        square: Square,
+    },
+    /// A square is in two piece-kind bitboards.
+    KindsOverlap {
+        /// The offending square.
+        square: Square,
+    },
+    /// The mailbox and the bitboards disagree about a square.
+    MailboxDisagrees {
+        /// The offending square.
+        square: Square,
+        /// What the mailbox says.
+        mailbox: Option<Piece>,
+        /// What the bitboards say.
+        bitboards: Option<Piece>,
+    },
+    /// A side does not have exactly one king.
+    KingCount {
+        /// Which side.
+        color: Color,
+        /// How many kings it has.
+        found: u32,
+    },
+    /// The incrementally maintained key disagrees with a recompute.
+    KeyDisagrees {
+        /// The stored key.
+        stored: ZobristKey,
+        /// The key recomputed from the mailbox.
+        recomputed: ZobristKey,
+    },
+    /// The incrementally maintained pawn key disagrees with a recompute.
+    PawnKeyDisagrees {
+        /// The stored key.
+        stored: PawnKey,
+        /// The key recomputed from the pawn bitboard.
+        recomputed: PawnKey,
+    },
+    /// A bit above the fullmove field is set.
+    ReservedStateBitsSet {
+        /// The offending state word.
+        state: u64,
+    },
+    /// The en-passant nibble holds a value that is neither a file nor "none".
+    EnPassantNibbleInvalid {
+        /// The offending nibble.
+        nibble: u64,
+    },
+    /// The fullmove number is zero, which no legal FEN records.
+    FullmoveNumberIsZero,
+}
+
+impl fmt::Display for BoardInvariant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OccupancyDisagrees => {
+                write!(
+                    f,
+                    "the colour bitboards and the piece bitboards cover different squares"
+                )
+            }
+            Self::ColorsOverlap { square } => write!(f, "square {square} is both White and Black"),
+            Self::KindsOverlap { square } => {
+                write!(f, "square {square} is in two piece-kind bitboards")
+            }
+            Self::MailboxDisagrees {
+                square,
+                mailbox,
+                bitboards,
+            } => write!(
+                f,
+                "square {square}: the mailbox says {mailbox:?} and the bitboards say {bitboards:?}"
+            ),
+            Self::KingCount { color, found } => {
+                write!(f, "{color:?} has {found} kings, not exactly one")
+            }
+            Self::KeyDisagrees { stored, recomputed } => write!(
+                f,
+                "the incremental key {stored:x} disagrees with the recompute {recomputed:x}"
+            ),
+            Self::PawnKeyDisagrees { stored, recomputed } => write!(
+                f,
+                "the incremental pawn key {stored:x} disagrees with the recompute {recomputed:x}"
+            ),
+            Self::ReservedStateBitsSet { state } => {
+                write!(f, "reserved state bits are set: {state:#018x}")
+            }
+            Self::EnPassantNibbleInvalid { nibble } => {
+                write!(
+                    f,
+                    "the en-passant nibble is {nibble}, which is neither a file nor 'none'"
+                )
+            }
+            Self::FullmoveNumberIsZero => write!(f, "the fullmove number is zero"),
+        }
+    }
+}
+
+impl core::error::Error for BoardInvariant {}
+
+impl Board {
+    /// The FEN of the initial position.
+    pub const STARTPOS_FEN: &'static str =
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+
+    /// The initial position.
+    ///
+    /// # Panics
+    ///
+    /// Never: [`Board::STARTPOS_FEN`] is a constant this crate's own parser accepts, and a
+    /// test asserts it.
+    #[must_use]
+    pub fn startpos() -> Self {
+        match Self::from_fen(Self::STARTPOS_FEN) {
+            Ok(board) => board,
+            Err(e) => unreachable!("the start position FEN must parse: {e}"),
+        }
+    }
+
+    /// The piece standing on `square`, if any.
+    #[must_use]
+    pub const fn piece_at(&self, square: Square) -> Option<Piece> {
+        self.mailbox[square.index()]
+    }
+
+    /// The squares holding a piece of `kind`, of either colour.
+    #[must_use]
+    pub const fn pieces(&self, kind: PieceKind) -> Bitboard {
+        self.pieces[kind.index()]
+    }
+
+    /// The squares holding a piece of `color`.
+    #[must_use]
+    pub const fn colored(&self, color: Color) -> Bitboard {
+        self.colors[color.index()]
+    }
+
+    /// The squares holding any piece.
+    #[must_use]
+    pub const fn occupied(&self) -> Bitboard {
+        self.colors[0].union(self.colors[1])
+    }
+
+    /// The squares holding a piece of `kind` and `color`.
+    #[must_use]
+    pub const fn pieces_colored(&self, kind: PieceKind, color: Color) -> Bitboard {
+        self.pieces[kind.index()].intersection(self.colors[color.index()])
+    }
+
+    /// Whose turn it is.
+    #[must_use]
+    pub const fn side_to_move(&self) -> Color {
+        if self.state & 1 == 0 {
+            Color::White
+        } else {
+            Color::Black
+        }
+    }
+
+    /// The castling rights still available.
+    #[must_use]
+    pub const fn castling(&self) -> CastlingRights {
+        match CastlingRights::from_bits(((self.state >> CASTLING_SHIFT) & 0b1111) as u8) {
+            Some(rights) => rights,
+            None => unreachable!(),
+        }
+    }
+
+    /// The en-passant file, if a pawn just made a double push.
+    ///
+    /// A file, not a square: the rank follows from the side to move (D-0019).
+    #[must_use]
+    pub const fn ep_file(&self) -> Option<File> {
+        let nibble = (self.state >> EN_PASSANT_SHIFT) & 0b1111;
+        if nibble >= NO_EN_PASSANT {
+            return None;
+        }
+        File::new(nibble as u8)
+    }
+
+    /// The en-passant target square, reconstructed from the file and the side to move.
+    ///
+    /// Rank 6 when White is to move — Black has just pushed — and rank 3 when Black is.
+    #[must_use]
+    pub const fn ep_square(&self) -> Option<Square> {
+        let file = match self.ep_file() {
+            Some(file) => file,
+            None => return None,
+        };
+        let rank = match self.side_to_move() {
+            Color::White => 5,
+            Color::Black => 2,
+        };
+        Square::new(file, rank)
+    }
+
+    /// Plies since the last capture or pawn move.
+    #[must_use]
+    pub const fn halfmove_clock(&self) -> u16 {
+        ((self.state >> HALFMOVE_SHIFT) & 0xFFFF) as u16
+    }
+
+    /// The move number, starting at 1 and incremented after Black moves.
+    #[must_use]
+    pub const fn fullmove_number(&self) -> u16 {
+        ((self.state >> FULLMOVE_SHIFT) & 0xFFFF) as u16
+    }
+
+    /// The packed state word, for tests that assert the packing itself.
+    #[must_use]
+    pub const fn state_word(&self) -> u64 {
+        self.state
+    }
+
+    /// The incrementally maintained position key.
+    ///
+    /// This is the value a search stack threads to detect repetition — see the type-level
+    /// note about there being no undo stack.
+    #[must_use]
+    pub const fn key(&self) -> ZobristKey {
+        self.key
+    }
+
+    /// The incrementally maintained pawn-structure key.
+    #[must_use]
+    pub const fn pawn_key(&self) -> PawnKey {
+        self.pawn_key
+    }
+
+    /// The position key, recomputed from scratch by walking the **mailbox**.
+    ///
+    /// Deliberately reads a different representation from the one [`Board::to_fen`] reads
+    /// and from the one [`Board::recomputed_pawn_key`] reads, so that agreement between
+    /// them is evidence rather than two views of one mistake.
+    #[must_use]
+    pub fn recomputed_key(&self) -> ZobristKey {
+        let mut key = ZobristKey::ZERO;
+        for index in 0..Square::COUNT {
+            let square = match Square::from_index(index as u8) {
+                Some(square) => square,
+                None => unreachable!("index is below 64"),
+            };
+            if let Some(piece) = self.mailbox[index] {
+                key ^= zobrist::piece_square(piece, square);
+            }
+        }
+        key ^= zobrist::castling(self.castling());
+        key ^= zobrist::en_passant(self.ep_file());
+        if self.side_to_move() == Color::Black {
+            key ^= zobrist::side_to_move();
+        }
+        key
+    }
+
+    /// The pawn key, recomputed from scratch by folding the **pawn bitboard**.
+    #[must_use]
+    pub fn recomputed_pawn_key(&self) -> PawnKey {
+        let mut key = PawnKey::ZERO;
+        for color in Color::ALL {
+            let piece = Piece::new(color, PieceKind::Pawn);
+            for square in self.pieces_colored(PieceKind::Pawn, color).squares() {
+                key ^= zobrist::piece_square(piece, square);
+            }
+        }
+        key
+    }
+
+    /// Whether two boards are the same *position* — everything the zobrist key reads.
+    ///
+    /// Differs from `==` exactly in ignoring the halfmove clock and the fullmove number,
+    /// which is the relation acceptance criterion 5 is about: two boards reached by
+    /// different move orders can be the same position while their move numbers differ.
+    #[must_use]
+    pub fn same_position(&self, other: &Self) -> bool {
+        self.pieces == other.pieces
+            && self.colors == other.colors
+            && self.state & POSITION_MASK == other.state & POSITION_MASK
+    }
+
+    /// Check every redundancy in the representation against the others.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`BoardInvariant`] that does not hold.
+    pub fn check_invariants(&self) -> Result<(), BoardInvariant> {
+        if self.state >> 41 != 0 {
+            return Err(BoardInvariant::ReservedStateBitsSet { state: self.state });
+        }
+        let nibble = (self.state >> EN_PASSANT_SHIFT) & 0b1111;
+        if nibble > NO_EN_PASSANT {
+            return Err(BoardInvariant::EnPassantNibbleInvalid { nibble });
+        }
+        if self.fullmove_number() == 0 {
+            return Err(BoardInvariant::FullmoveNumberIsZero);
+        }
+
+        let mut kind_union = Bitboard::EMPTY;
+        for (i, board) in self.pieces.iter().enumerate() {
+            for (j, other) in self.pieces.iter().enumerate() {
+                if i < j
+                    && let Some(square) = board.intersection(*other).squares().next()
+                {
+                    return Err(BoardInvariant::KindsOverlap { square });
+                }
+            }
+            kind_union = kind_union.union(*board);
+        }
+        if let Some(square) = self.colors[0].intersection(self.colors[1]).squares().next() {
+            return Err(BoardInvariant::ColorsOverlap { square });
+        }
+        if kind_union != self.occupied() {
+            return Err(BoardInvariant::OccupancyDisagrees);
+        }
+
+        for index in 0..Square::COUNT {
+            let square = match Square::from_index(index as u8) {
+                Some(square) => square,
+                None => unreachable!("index is below 64"),
+            };
+            let from_bitboards = self.piece_from_bitboards(square);
+            if self.mailbox[index] != from_bitboards {
+                return Err(BoardInvariant::MailboxDisagrees {
+                    square,
+                    mailbox: self.mailbox[index],
+                    bitboards: from_bitboards,
+                });
+            }
+        }
+
+        for color in Color::ALL {
+            let kings = self.pieces_colored(PieceKind::King, color).count();
+            if kings != 1 {
+                return Err(BoardInvariant::KingCount {
+                    color,
+                    found: kings,
+                });
+            }
+        }
+
+        let recomputed = self.recomputed_key();
+        if recomputed != self.key {
+            return Err(BoardInvariant::KeyDisagrees {
+                stored: self.key,
+                recomputed,
+            });
+        }
+        let recomputed = self.recomputed_pawn_key();
+        if recomputed != self.pawn_key {
+            return Err(BoardInvariant::PawnKeyDisagrees {
+                stored: self.pawn_key,
+                recomputed,
+            });
+        }
+        Ok(())
+    }
+
+    /// The FEN piece-placement field, read from the **bitboards**.
+    ///
+    /// Deliberately not read from the mailbox: [`Board::recomputed_key`] walks the mailbox,
+    /// so `from_fen(&board.to_fen()) == board` crosses both representations in one
+    /// assertion rather than checking one of them twice.
+    #[must_use]
+    pub fn placement_field(&self) -> String {
+        let mut out = String::with_capacity(72);
+        for rank in (0..8u8).rev() {
+            let mut empty = 0u32;
+            for file in 0..8u8 {
+                let file = match File::new(file) {
+                    Some(file) => file,
+                    None => unreachable!("index is below 8"),
+                };
+                let square = match Square::new(file, rank) {
+                    Some(square) => square,
+                    None => unreachable!("rank is below 8"),
+                };
+                match self.piece_from_bitboards(square) {
+                    Some(piece) => {
+                        if empty > 0 {
+                            out.push_str(&empty.to_string());
+                            empty = 0;
+                        }
+                        out.push(piece.to_fen_char());
+                    }
+                    None => empty += 1,
+                }
+            }
+            if empty > 0 {
+                out.push_str(&empty.to_string());
+            }
+            if rank > 0 {
+                out.push('/');
+            }
+        }
+        out
+    }
+
+    /// What the bitboards alone say stands on `square`.
+    fn piece_from_bitboards(&self, square: Square) -> Option<Piece> {
+        let color = if self.colors[0].contains(square) {
+            Color::White
+        } else if self.colors[1].contains(square) {
+            Color::Black
+        } else {
+            return None;
+        };
+        for kind in PieceKind::ALL {
+            if self.pieces[kind.index()].contains(square) {
+                return Some(Piece::new(color, kind));
+            }
+        }
+        None
+    }
+}
+
+impl fmt::Debug for Board {
+    /// Decodes the packed word into named fields.
+    ///
+    /// The only real cost of packing five things into one integer is an opaque number in a
+    /// debugger at three in the morning, and that cost is removable for ten lines.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Board")
+            .field("placement", &self.placement_field())
+            .field("side_to_move", &self.side_to_move())
+            .field("castling", &format_args!("{}", self.castling()))
+            .field("ep_file", &self.ep_file().map(|f| f.to_char()))
+            .field("halfmove_clock", &self.halfmove_clock())
+            .field("fullmove_number", &self.fullmove_number())
+            .field("key", &format_args!("{:x}", self.key))
+            .field("pawn_key", &format_args!("{:x}", self.pawn_key))
+            .finish()
+    }
+}

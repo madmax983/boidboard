@@ -9,7 +9,9 @@
 //! oracle. See [`perft::oracle`].
 
 pub mod board;
+pub mod fen;
 pub mod perft;
 pub mod zobrist;
 
-pub use board::{Bitboard, CastlingRights, Color, File, Piece, PieceKind, Square};
+pub use board::{Bitboard, Board, CastlingRights, Color, File, Piece, PieceKind, Square};
+pub use fen::FenError;
