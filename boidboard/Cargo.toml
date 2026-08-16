@@ -1,0 +1,34 @@
+[package]
+name = "boidboard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+default-run = "boidboard"
+
+[dependencies]
+boids-core = { path = "../boids-core" }
+autumn-web = { workspace = true }
+autumn-harvest = { workspace = true }
+autumn-harvest-plugin = { workspace = true }
+autumn-harvest-macros = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+diesel = { workspace = true }
+diesel-async = { workspace = true }
+diesel_migrations = { workspace = true }
+pq-sys = { workspace = true }
+maud = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+disallowed_methods = "allow"

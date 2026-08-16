@@ -1,0 +1,21 @@
+[package]
+name = "boids-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# boids-core is the pure simulation kernel. It must NEVER depend on the web
+# framework, the workflow engine, a database driver, or an HTTP client. The
+# dependency list below is the enforcement mechanism for that rule, and
+# `tests/purity.rs` asserts it stays that way.
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"
