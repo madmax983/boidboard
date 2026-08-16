@@ -211,6 +211,22 @@ jobs:
           grep -A1 'name = "autumn-harvest"' Cargo.lock | grep -q 'version = "0.5.'
           echo "Cargo.lock is tracked and pins autumn-web 0.6.x / autumn-harvest 0.5.x"
 
+      - name: Zobrist table matches its independent Python derivation (D-0024)
+        run: |
+          set -euo pipefail
+          # scripts/zobrist-reference.py was written from docs/DECISIONS.md D-0018/D-0024,
+          # not from src/zobrist.rs, and its digest was computed BEFORE the Rust constant
+          # was pinned. This step keeps the two derivations tied together.
+          command -v python3 >/dev/null || { echo "python3 is required"; exit 1; }
+          derived=$(./scripts/zobrist-reference.py)
+          pinned=$(grep -oE '"[0-9a-f]{64}"' crates/boid-board/tests/zobrist_digest.rs \
+                   | head -1 | tr -d '"')
+          # An empty pinned value would make the comparison vacuously pass on a rename.
+          [ -n "$pinned" ] || { echo "no pinned digest found in zobrist_digest.rs"; exit 1; }
+          echo "python: $derived"
+          echo "pinned: $pinned"
+          [ "$derived" = "$pinned" ]
+
       - name: Anti-theatre scan
         run: |
           set -euo pipefail
