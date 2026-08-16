@@ -146,9 +146,12 @@ impl StockfishEngine {
     /// Used by tests to decide between skipping loudly and failing.
     #[must_use]
     pub fn is_available(&self) -> bool {
+        // stdout is discarded rather than piped. A piped-but-unread stdout deadlocks
+        // `wait()` as soon as the child writes more than the pipe buffer, and "is this
+        // binary runnable" must never be able to hang.
         Command::new(&self.path)
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
+            .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .is_ok_and(|mut child| {
@@ -213,8 +216,9 @@ impl PerftEngine for StockfishEngine {
         // Never a default of 0 or None: a missing count means the query did not do what
         // was asked, and silently reporting "0 nodes" would be indistinguishable from a
         // position with no legal moves.
+        let tail = stdout.lines().rev().take(5).collect::<Vec<_>>().join(" | ");
         Err(EngineError::NoNodeCount {
-            output: stdout.lines().rev().take(5).collect::<Vec<_>>().join(" | "),
+            output: format!("exit {}; last output: {tail}", output.status),
         })
     }
 }

@@ -30,7 +30,7 @@ use boid_board::perft::oracle::{ORACLE_TEXT, Provenance, parse};
 ///
 /// If this test fails, the fixture changed. That is not automatically wrong — but it must
 /// be deliberate, and the new value must be justified in the commit message.
-const ORACLE_SHA256: &str = "65c02664c3143da3a3696d7b2577b36225e8318069c3c8dc4f12fa4760950886";
+const ORACLE_SHA256: &str = "2b3471fe7115d4bfd435a37c0683d04c17e14939628a71de7c4551116599de05";
 
 /// The seven FENs, typed by hand from https://www.chessprogramming.org/Perft_Results
 /// (fetched 2026-08-16), with U+00A0 separators normalised to U+0020 per D-0008.
@@ -154,8 +154,12 @@ fn kiwipete_fen_has_four_fields() {
         .find(|c| c.id == "kiwipete")
         .expect("fixture must contain Kiwipete");
 
+    // Deliberately asserts on the RAW FEN, not via PerftCase::fen_fields(). During review
+    // a mutation replacing that accessor's body with a hardcoded `4` survived the entire
+    // suite, because every call site routed through it — the accessor could lie and no
+    // test disagreed.
     assert_eq!(
-        kiwipete.fen_fields(),
+        kiwipete.fen.split(' ').count(),
         4,
         "Kiwipete is published without halfmove/fullmove counters and is stored as \
          published; appending \" 0 1\" would make the fixture disagree with its source"
@@ -328,4 +332,70 @@ fn sha256_implementation_matches_published_vectors() {
         sha256_hex(&million_a),
         "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
     );
+}
+
+#[test]
+fn fen_fields_accessor_agrees_with_the_raw_fen() {
+    // Pins the accessor against a direct computation, and pins WHICH position is the
+    // four-field one. A hardcoded return value now fails on both counts.
+    let cases = parse(ORACLE_TEXT).expect("the committed fixture must parse");
+    let mut four_field = Vec::new();
+
+    for case in &cases {
+        assert_eq!(
+            case.fen_fields(),
+            case.fen.split(' ').count(),
+            "{}: fen_fields() disagrees with the FEN it reports on",
+            case.id
+        );
+        if case.fen_fields() == 4 {
+            four_field.push(case.id);
+        }
+    }
+
+    assert_eq!(
+        four_field,
+        vec!["kiwipete"],
+        "kiwipete is the only position the wiki publishes without move counters"
+    );
+}
+
+#[test]
+fn verified_counts_excludes_published_only_rows() {
+    // A mutation dropping the provenance filter from verified_counts() survived the suite:
+    // every 'p' count in the real fixture is also over the replay budget, so the
+    // differential harness filtered them out for the wrong reason. This pins the semantics
+    // directly, on a fixture built for the purpose.
+    let text = "x | 4k3/8/8/8/8/8/8/4K3 w - - 0 1 | 1:20v 2:400p 3:8902v";
+    let cases = parse(text).expect("must parse");
+    let case = &cases[0];
+
+    let verified: Vec<u32> = case.verified_counts().map(|c| c.depth).collect();
+    assert_eq!(
+        verified,
+        vec![1, 3],
+        "verified_counts() must yield only Verified rows, not every row"
+    );
+    assert_eq!(case.counts.len(), 3, "all three rows are still parsed");
+
+    for count in case.verified_counts() {
+        assert_eq!(count.provenance, Provenance::Verified);
+    }
+}
+
+#[test]
+fn fixture_provenance_totals_are_what_the_project_claims() {
+    // The published-vs-verified split is quoted in the README, the fixture header and the
+    // pull request. During review those quoted totals turned out to be wrong, so they are
+    // now pinned here and cannot drift again unnoticed.
+    let cases = parse(ORACLE_TEXT).expect("the committed fixture must parse");
+    let total: usize = cases.iter().map(|c| c.counts.len()).sum();
+    let verified: usize = cases.iter().map(|c| c.verified_counts().count()).sum();
+
+    assert_eq!(total, 55, "total node counts in the fixture");
+    assert_eq!(
+        verified, 44,
+        "counts independently re-derived with Stockfish"
+    );
+    assert_eq!(total - verified, 11, "published-only counts");
 }

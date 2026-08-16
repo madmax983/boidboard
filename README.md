@@ -25,8 +25,10 @@ positions, transcribed from the [Chess Programming Wiki][cpw] and committed **be
 engine code existed**. That ordering is the point: the standard this engine will be judged
 against was fixed before there was an implementation that could have shaped it.
 
-Each count carries a provenance flag — `v` for counts this project independently re-derived
-with Stockfish, `p` for counts that are published but too deep to replay here. The fixture
+Each count carries a provenance flag. Of the 55 counts, **44 are `v`** — independently
+re-derived with Stockfish by this project — and 11 are `p`, published but not corroborated
+here, being either too deep to replay in reasonable time or `perft(0)`, which is 1 by
+definition and which `go perft 0` cannot report. The fixture
 is embedded with `include_str!`, so deleting or renaming it is a compile error, and its
 SHA-256 is pinned in the test source, so editing a digit is a test failure.
 

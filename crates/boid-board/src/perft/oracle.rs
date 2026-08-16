@@ -314,9 +314,15 @@ pub fn parse(text: &str) -> Result<Vec<PerftCase<'_>>, OracleError> {
 
 /// Check that `fen` is structurally well-formed.
 ///
-/// This is a *structural* check, not a legality check: it verifies that the string
-/// describes a board at all, not that the position could arise in a game. Legality is
-/// issue #4's problem, and needs a `Position` to express.
+/// Structural, plus the one plausibility rule that costs nothing and catches real
+/// transcription damage: **exactly one king per side**. That rule is strictly speaking
+/// about legality rather than structure, and it is applied deliberately — a FEN with two
+/// white kings is well-formed but is never a chess position, and in an oracle fixture it
+/// means a rank was mistyped.
+///
+/// Everything beyond that is out of scope and belongs to issue #4, which needs a
+/// `Position` to express it: side-not-to-move in check, pawns on the first or eighth rank,
+/// castling rights without the matching rook, en passant squares with no pawn to capture.
 ///
 /// Accepts four-field FENs as well as six-field ones, because the published Kiwipete FEN
 /// omits the halfmove and fullmove counters and is stored as published (D-0008).
@@ -497,7 +503,7 @@ fn parse_counts(line: usize, field: &str) -> Result<Vec<DepthCount>, OracleError
             return Err(OracleError::DuplicateDepth { line, depth });
         }
         if let Some(previous) = counts.last().map(|c| c.depth)
-            && depth != previous + 1
+            && Some(depth) != previous.checked_add(1)
         {
             return Err(OracleError::DepthGap {
                 line,
@@ -510,6 +516,18 @@ fn parse_counts(line: usize, field: &str) -> Result<Vec<DepthCount>, OracleError
             depth,
             nodes,
             provenance,
+        });
+    }
+
+    // Adjacent-pair contiguity cannot see a row dropped from the FRONT: 2,3,4 is as
+    // contiguous as 1,2,3. Every published table starts at depth 0 or 1, so anchor it.
+    if let Some(first) = counts.first()
+        && first.depth > 1
+    {
+        return Err(OracleError::DepthGap {
+            line,
+            previous: 0,
+            found: first.depth,
         });
     }
 

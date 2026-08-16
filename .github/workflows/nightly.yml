@@ -66,5 +66,11 @@ jobs:
       # Deliberately no rust-cache: this job exists to prove a clean checkout builds.
       - name: Install pinned toolchain
         run: ./scripts/setup-toolchain.sh
+      - run: ./scripts/setup-stockfish.sh
       - run: cargo build --workspace --locked
-      - run: cargo test --workspace --locked
+      - name: cargo test --workspace --locked
+        # Without REQUIRE the differential tests would skip silently on a cold runner,
+        # which would make this job's green tick mean less than it appears to.
+        env:
+          BOIDBOARD_REQUIRE_STOCKFISH: "1"
+        run: cargo test --workspace --locked

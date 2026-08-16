@@ -55,7 +55,8 @@ jobs:
 
   # `cargo fmt` without --check rewrites files and exits 0 unconditionally: it can never
   # fail. The issue says "CI running fmt" without specifying; this is the only reading
-  # under which the job means anything (docs/DECISIONS.md, D-0039 rationale in the PR).
+  # under which the job means anything (the issue is silent on which fmt invocation it means; this is the only
+  # reading under which the job can ever fail).
   fmt:
     name: fmt
     runs-on: ubuntu-latest
@@ -112,6 +113,7 @@ jobs:
             .packages[] as $p
             | $p.dependencies[]
             | select(.path != null)
+            | select(.kind == null)
             | "\($p.name) -> \(.name)"
           ' | sort -u > /tmp/actual-edges.txt
           # Strip the comment header before comparing; only edges are data.
@@ -143,7 +145,9 @@ jobs:
       - name: No self-authored acceptance-criteria document (D-0002)
         run: |
           set -euo pipefail
-          found=$(find docs -iname 'accept*' -o -iname 'criteria*' 2>/dev/null || true)
+          # Repository-wide, not just docs/: the rule is about the document existing at
+          # all, and confining the search to one directory made it trivially evadable.
+          found=$(git ls-files | grep -iE '(^|/)(accept|criteria)[^/]*$' || true)
           if [ -n "$found" ]; then
             echo "D-0002 violated: this project may not author its own acceptance criteria"
             echo "in-repo until the perft harness is green. Found:"
@@ -154,6 +158,9 @@ jobs:
       - name: Perft oracle fixture is ASCII-only (D-0008)
         run: |
           set -euo pipefail
+          # Existence first: `grep` on a missing file returns non-zero, which this check
+          # would otherwise read as "no non-ASCII bytes found" and pass vacuously.
+          test -f tests/fixtures/perft_oracle.txt
           # Six of the seven published FENs use U+00A0. Stockfish's tokeniser is ASCII-only
           # and silently mis-parses those into a different position reporting 0 nodes.
           if LC_ALL=C grep -nP '[^\x00-\x7F]' tests/fixtures/perft_oracle.txt; then
@@ -182,9 +189,12 @@ jobs:
         run: |
           set -euo pipefail
           git ls-files --error-unmatch Cargo.lock >/dev/null
-          grep -q 'name = "autumn-web"' Cargo.lock
-          grep -q 'name = "autumn-harvest"' Cargo.lock
-          echo "Cargo.lock is tracked and pins both autumn crates"
+          # Assert the VERSIONS, not just the names: a name-only check passes for any
+          # resolution inside the caret range, which is precisely what the lockfile exists
+          # to nail down (D-0013).
+          grep -A1 'name = "autumn-web"'     Cargo.lock | grep -q 'version = "0.6.'
+          grep -A1 'name = "autumn-harvest"' Cargo.lock | grep -q 'version = "0.5.'
+          echo "Cargo.lock is tracked and pins autumn-web 0.6.x / autumn-harvest 0.5.x"
 
       - name: Anti-theatre scan
         run: ./scripts/anti-theatre.sh

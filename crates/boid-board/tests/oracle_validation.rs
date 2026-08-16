@@ -259,3 +259,70 @@ fn committed_fixture_satisfies_its_own_invariants() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------
+// Gaps found by mutation testing during review. Each test below exists because a
+// deliberate mutation of the source survived the suite as it stood.
+// ---------------------------------------------------------------------------------
+
+#[test]
+fn rejects_position_with_no_counts() {
+    let e = err("x | 4k3/8/8/8/8/8/8/4K3 w - - 0 1 | ");
+    assert!(
+        matches!(e, OracleError::NoCounts { .. }),
+        "expected NoCounts, got {e:?}"
+    );
+}
+
+#[test]
+fn rejects_count_token_without_a_colon() {
+    let e = err("x | 4k3/8/8/8/8/8/8/4K3 w - - 0 1 | 1-20v");
+    assert!(
+        matches!(e, OracleError::MalformedCountToken { .. }),
+        "expected MalformedCountToken, got {e:?}"
+    );
+}
+
+#[test]
+fn rejects_non_numeric_depth() {
+    let e = err("x | 4k3/8/8/8/8/8/8/4K3 w - - 0 1 | a:20v");
+    assert!(
+        matches!(e, OracleError::MalformedCountToken { .. }),
+        "expected MalformedCountToken, got {e:?}"
+    );
+}
+
+#[test]
+fn rejects_depths_that_do_not_start_at_zero_or_one() {
+    // Adjacent-pair contiguity cannot see a row dropped from the FRONT: 2,3,4 is as
+    // contiguous as 1,2,3. Dropping the first published row is exactly the transcription
+    // slip that would go unnoticed.
+    let e = err("x | 4k3/8/8/8/8/8/8/4K3 w - - 0 1 | 2:400v 3:8902v");
+    assert!(
+        matches!(e, OracleError::DepthGap { found: 2, .. }),
+        "expected DepthGap anchored at the front, got {e:?}"
+    );
+}
+
+#[test]
+fn rejects_non_numeric_move_counters() {
+    for bad in [
+        "x | 4k3/8/8/8/8/8/8/4K3 w - - x 1 | 1:20v",
+        "x | 4k3/8/8/8/8/8/8/4K3 w - - 0 y | 1:20v",
+    ] {
+        let e = err(bad);
+        assert!(
+            matches!(e, OracleError::MalformedFen { .. }),
+            "expected MalformedFen for {bad:?}, got {e:?}"
+        );
+    }
+}
+
+#[test]
+fn accepts_large_but_valid_move_counters() {
+    let text = "x | 4k3/8/8/8/8/8/8/4K3 w - - 100 9999 | 1:20v";
+    assert!(
+        parse(text).is_ok(),
+        "six-field FEN with large counters must parse"
+    );
+}
