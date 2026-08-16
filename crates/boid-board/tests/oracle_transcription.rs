@@ -155,7 +155,7 @@ fn kiwipete_fen_has_four_fields() {
         .expect("fixture must contain Kiwipete");
 
     assert_eq!(
-        kiwipete.fen.split(' ').count(),
+        kiwipete.fen_fields(),
         4,
         "Kiwipete is published without halfmove/fullmove counters and is stored as \
          published; appending \" 0 1\" would make the fixture disagree with its source"

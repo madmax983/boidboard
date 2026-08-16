@@ -22,7 +22,7 @@
 //! which turns the skip into a failure so the coverage cannot silently evaporate.
 
 use boid_board::perft::engine::{EngineError, PerftEngine, StockfishEngine};
-use boid_board::perft::oracle::{ORACLE_TEXT, Provenance, parse};
+use boid_board::perft::oracle::{ORACLE_TEXT, parse};
 
 /// Default replay ceiling: about 16 million nodes across the whole fixture, well under a
 /// second against Stockfish.
@@ -69,8 +69,8 @@ fn every_verified_row_within_budget_matches_the_engine() {
     let mut mismatches: Vec<String> = Vec::new();
 
     for case in &cases {
-        for count in &case.counts {
-            if count.provenance != Provenance::Verified || count.nodes > budget || count.depth < 1 {
+        for count in case.verified_counts() {
+            if count.nodes > budget || count.depth < 1 {
                 continue;
             }
             let actual = engine

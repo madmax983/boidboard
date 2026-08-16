@@ -216,7 +216,7 @@ fn accepts_the_published_four_field_kiwipete_fen() {
     let text =
         "kiwipete | r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - | 1:48v";
     let cases = parse(text).expect("the published four-field FEN must be accepted");
-    assert_eq!(cases[0].fen.split(' ').count(), 4);
+    assert_eq!(cases[0].fen_fields(), 4);
 }
 
 // ---------------------------------------------------------------------------------
@@ -228,7 +228,7 @@ fn committed_fixture_satisfies_its_own_invariants() {
     let cases = parse(ORACLE_TEXT).expect("the committed fixture must parse");
 
     for case in &cases {
-        let fields = case.fen.split(' ').count();
+        let fields = case.fen_fields();
         assert!(
             fields == 4 || fields == 6,
             "{}: FEN should have 4 or 6 fields, has {fields}",

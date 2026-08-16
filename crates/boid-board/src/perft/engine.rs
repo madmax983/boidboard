@@ -18,6 +18,31 @@ pub const STOCKFISH_PATH_VAR: &str = "BOID_STOCKFISH";
 ///
 /// Implemented by the external Stockfish driver now, and by boidboard's own move generator
 /// in issue #6. The differential harness is then just: run both, compare.
+///
+/// # Examples
+///
+/// Implementing the trait — this is the shape issue #6's engine side will take:
+///
+/// ```
+/// use boid_board::perft::engine::{EngineError, PerftEngine};
+///
+/// struct CountsOnlyTheRoot;
+///
+/// impl PerftEngine for CountsOnlyTheRoot {
+///     fn perft(&self, _fen: &str, depth: u32) -> Result<u64, EngineError> {
+///         if depth < 1 {
+///             return Err(EngineError::DepthTooLow(depth));
+///         }
+///         Ok(1)
+///     }
+/// }
+///
+/// assert_eq!(CountsOnlyTheRoot.perft("startpos", 1).unwrap(), 1);
+/// assert!(matches!(
+///     CountsOnlyTheRoot.perft("startpos", 0),
+///     Err(EngineError::DepthTooLow(0))
+/// ));
+/// ```
 pub trait PerftEngine {
     /// Count leaf nodes at `depth` plies from `fen`.
     ///

@@ -15,6 +15,17 @@ use std::fmt;
 /// Declared exactly once in the workspace. A missing or renamed fixture is a **compile
 /// error**, not a skipped test — which is what makes the fixture load-bearing rather than
 /// decorative (D-0007).
+///
+/// # Examples
+///
+/// ```
+/// use boid_board::perft::oracle::{ORACLE_TEXT, parse};
+///
+/// let cases = parse(ORACLE_TEXT).expect("the committed fixture parses");
+/// assert_eq!(cases.len(), 7);
+/// assert_eq!(cases[0].id, "startpos");
+/// assert_eq!(cases[0].nodes_at(3), Some(8902));
+/// ```
 pub const ORACLE_TEXT: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tests/fixtures/perft_oracle.txt"
@@ -63,6 +74,23 @@ impl PerftCase<'_> {
             .iter()
             .find(|c| c.depth == depth)
             .map(|c| c.nodes)
+    }
+
+    /// How many space-separated fields this position's FEN has: 6 normally, 4 for the
+    /// published Kiwipete FEN, which omits the halfmove and fullmove counters (D-0008).
+    #[must_use]
+    pub fn fen_fields(&self) -> usize {
+        self.fen.split(' ').count()
+    }
+
+    /// The counts this project independently re-derived, cheapest first.
+    ///
+    /// This is the replay set for a differential harness: [`Provenance::Published`] counts
+    /// are documentation and must not be treated as checked.
+    pub fn verified_counts(&self) -> impl Iterator<Item = &DepthCount> {
+        self.counts
+            .iter()
+            .filter(|c| c.provenance == Provenance::Verified)
     }
 }
 
@@ -206,6 +234,42 @@ impl Error for OracleError {}
 /// Returns [`OracleError`] if any line violates the grammar documented in the fixture
 /// header: wrong field count, a non-numeric or oversized node count, a missing provenance
 /// flag, duplicate or non-contiguous depths, a duplicate id, or a structurally invalid FEN.
+///
+/// # Examples
+///
+/// ```
+/// use boid_board::perft::oracle::{self, Provenance};
+///
+/// // Built by concatenation rather than as a multi-line literal: rustdoc strips lines
+/// // beginning with '#' from doc examples, which would silently eat the comment line
+/// // this example exists to demonstrate.
+/// let text = [
+///     "# comments and blank lines are ignored",
+///     "",
+///     "startpos | rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 | 1:20v 2:400p",
+/// ]
+/// .join("\n");
+///
+/// let cases = oracle::parse(&text)?;
+/// assert_eq!(cases.len(), 1);
+/// assert_eq!(cases[0].nodes_at(1), Some(20));
+/// assert_eq!(cases[0].counts[0].provenance, Provenance::Verified);
+/// assert_eq!(cases[0].counts[1].provenance, Provenance::Published);
+/// # Ok::<(), oracle::OracleError>(())
+/// ```
+///
+/// A node count must be digits only. Thousands separators, as the wiki prints them, are
+/// an error rather than something to silently rewrite:
+///
+/// ```
+/// use boid_board::perft::oracle::{self, OracleError};
+///
+/// let bad = "x | 4k3/8/8/8/8/8/8/4K3 w - - 0 1 | 1:1,486v";
+/// assert!(matches!(
+///     oracle::parse(bad),
+///     Err(OracleError::NonNumericCount { .. })
+/// ));
+/// ```
 pub fn parse(text: &str) -> Result<Vec<PerftCase<'_>>, OracleError> {
     let mut cases: Vec<PerftCase<'_>> = Vec::new();
 
@@ -260,6 +324,23 @@ pub fn parse(text: &str) -> Result<Vec<PerftCase<'_>>, OracleError> {
 /// # Errors
 ///
 /// Returns a human-readable reason. The caller attaches the line number.
+///
+/// # Examples
+///
+/// ```
+/// use boid_board::perft::oracle::validate_fen;
+///
+/// assert!(validate_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1").is_ok());
+///
+/// // Four fields is valid: the published Kiwipete FEN omits the move counters.
+/// assert!(validate_fen("4k3/8/8/8/8/8/8/4K3 w - -").is_ok());
+///
+/// // "4K4" describes nine files.
+/// assert!(validate_fen("4k3/8/8/8/8/8/8/4K4 w - - 0 1").is_err());
+///
+/// // A board needs exactly one king per side.
+/// assert!(validate_fen("8/8/8/8/8/8/8/4K3 w - - 0 1").is_err());
+/// ```
 pub fn validate_fen(fen: &str) -> Result<(), String> {
     let fields: Vec<&str> = fen.split(' ').collect();
     if fields.len() != 4 && fields.len() != 6 {
