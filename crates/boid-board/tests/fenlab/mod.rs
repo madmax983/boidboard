@@ -184,12 +184,15 @@ fn build(plan: Plan) -> String {
     let mut ep = "-".to_owned();
     if ep_choice < 8 {
         let file = usize::from(ep_choice);
-        // White to move means Black has just pushed: target on rank 6, pawn on rank 5, and
-        // the square it left, rank 7, empty.
+        // White to move means Black has just pushed h7-h5: the target is on rank 6
+        // (0-based 5), the pawn that pushed stands on rank 5 (0-based 4), and the square it
+        // LEFT is rank 7 (0-based 6) -- not rank 8. Getting that last one wrong is what the
+        // parser caught the first time this generator ran, and it is the reason the corpus
+        // is built from text rather than from Board.
         let (target, pawn, origin, letter) = if black_to_move {
-            (2 * 8 + file, 3 * 8 + file, file, 'P')
+            (2 * 8 + file, 3 * 8 + file, 8 + file, 'P')
         } else {
-            (5 * 8 + file, 4 * 8 + file, 7 * 8 + file, 'p')
+            (5 * 8 + file, 4 * 8 + file, 6 * 8 + file, 'p')
         };
         let clear = |sq: usize| !matches!(squares[sq], Some('K' | 'k'));
         if squares[target].is_none() && squares[origin].is_none() && clear(pawn) {

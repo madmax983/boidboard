@@ -361,9 +361,34 @@ impl Board {
     }
 
     /// Emit the canonical six-field FEN.
+    ///
+    /// Always six fields, even for a board parsed from the four-field form: `Board` keeps
+    /// no memory of its source text, because such a field would be compared by `PartialEq`
+    /// and copied on every `apply_move` (D-0020).
     #[must_use]
     pub fn to_fen(&self) -> String {
-        todo!("Board::to_fen")
+        let mut out = String::with_capacity(MAX_FEN_LEN);
+        self.write_fen(&mut out)
+            .expect("writing to a String cannot fail");
+        out
+    }
+
+    /// Write the canonical six-field FEN into any [`fmt::Write`].
+    ///
+    /// # Errors
+    ///
+    /// Only whatever `w` returns.
+    pub fn write_fen(&self, w: &mut impl fmt::Write) -> fmt::Result {
+        // The placement is read from the BITBOARDS while `recomputed_key` walks the
+        // mailbox, so `from_fen(&b.to_fen()) == b` crosses both representations.
+        write!(w, "{}", self.placement_field())?;
+        write!(w, " {}", self.side_to_move().to_fen_char())?;
+        write!(w, " {}", self.castling())?;
+        match self.ep_square() {
+            Some(square) => write!(w, " {square}")?,
+            None => w.write_str(" -")?,
+        }
+        write!(w, " {} {}", self.halfmove_clock(), self.fullmove_number())
     }
 }
 
