@@ -143,7 +143,53 @@ impl Default for StockfishEngine {
 
 impl PerftEngine for StockfishEngine {
     fn perft(&self, fen: &str, depth: u32) -> Result<u64, EngineError> {
-        let _ = (fen, depth);
-        todo!("StockfishEngine::perft is not implemented yet")
+        // Both checks happen before the process is spawned: each of them describes a case
+        // where the engine would answer *something* rather than fail.
+        if depth < 1 {
+            return Err(EngineError::DepthTooLow(depth));
+        }
+        if !fen.is_ascii() {
+            return Err(EngineError::NonAsciiFen(fen.to_owned()));
+        }
+
+        let mut child = Command::new(&self.path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+
+        {
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| io::Error::other("engine stdin unavailable"))?;
+            write!(stdin, "position fen {fen}\ngo perft {depth}\nquit\n")?;
+            stdin.flush()?;
+            // Dropping stdin closes it, which is what lets the engine see EOF and exit
+            // even if it ignored `quit`.
+        }
+
+        let output = child.wait_with_output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        // Tolerate the once-per-process banner and any `info` lines. The count is the
+        // first line whose trimmed form starts with "Nodes searched".
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            let Some(rest) = trimmed.strip_prefix("Nodes searched") else {
+                continue;
+            };
+            let digits = rest.trim_start().strip_prefix(':').unwrap_or(rest).trim();
+            return digits
+                .parse::<u64>()
+                .map_err(|_| EngineError::UnparseableCount(trimmed.to_owned()));
+        }
+
+        // Never a default of 0 or None: a missing count means the query did not do what
+        // was asked, and silently reporting "0 nodes" would be indistinguishable from a
+        // position with no legal moves.
+        Err(EngineError::NoNodeCount {
+            output: stdout.lines().rev().take(5).collect::<Vec<_>>().join(" | "),
+        })
     }
 }
