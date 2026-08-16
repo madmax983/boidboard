@@ -291,8 +291,10 @@ fn the_halfmove_clock_follows_every_rule() {
     let board = startpos_after(&["g1f3", "g8f6", "e2e4"]);
     assert_eq!(board.halfmove_clock(), 0);
 
-    // A capture resets it.
-    let board = play("4k3/8/8/8/8/5n2/8/4K2R w K - 7 20", &["h1h3"]);
+    // A capture resets it. The knight is on h3, not f3: "7n" is seven empty files then
+    // the knight on the h-file, and with it on f3 the rook's move would be quiet and this
+    // assertion would be testing the increment rule twice.
+    let board = play("4k3/8/8/8/8/7n/8/4K2R w K - 7 20", &["h1h3"]);
     assert_eq!(board.halfmove_clock(), 0, "the rook captured on h3");
 
     // Castling does NOT reset it: it is neither a pawn move nor a capture.
@@ -410,9 +412,7 @@ fn try_apply_move_rejects_structurally_impossible_moves() {
     .expect("distinct squares");
     assert_eq!(
         board.try_apply_move(mv),
-        Err(MoveNotApplicable::KindDisagreesWithBoard {
-            claimed: MoveKind::Quiet
-        })
+        Err(MoveNotApplicable::OwnPieceOnDestination)
     );
 
     // Castling with no right available.

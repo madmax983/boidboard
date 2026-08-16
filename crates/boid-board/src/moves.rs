@@ -27,7 +27,7 @@
 
 use core::fmt;
 
-use crate::board::{Board, Color, PieceKind, Square};
+use crate::board::{Board, CastlingRights, Color, File, Piece, PieceKind, Square};
 
 /// What kind of move this is — everything the board cannot work out for itself.
 ///
@@ -376,6 +376,23 @@ const fn promotion_kind(index: u8) -> PieceKind {
     }
 }
 
+/// Which castling rights a piece leaving or arriving at each square destroys.
+///
+/// Indexed by square. Six entries are non-zero: the four corners, which hold the rooks,
+/// and the two king home squares. Applying it to **both** `from` and `to` is what makes a
+/// rook *captured* on its home square lose the right, not only a rook that moves — the
+/// single commonest perft bug in the genre.
+pub(crate) const RIGHTS_LOST: [u8; 64] = {
+    let mut table = [0u8; 64];
+    table[0] = CastlingRights::WHITE_QUEEN.bits(); // a1
+    table[7] = CastlingRights::WHITE_KING.bits(); // h1
+    table[4] = CastlingRights::WHITE_KING.bits() | CastlingRights::WHITE_QUEEN.bits(); // e1
+    table[56] = CastlingRights::BLACK_QUEEN.bits(); // a8
+    table[63] = CastlingRights::BLACK_KING.bits(); // h8
+    table[60] = CastlingRights::BLACK_KING.bits() | CastlingRights::BLACK_QUEEN.bits(); // e8
+    table
+};
+
 impl Board {
     /// Apply a move, returning the resulting position.
     ///
@@ -388,12 +405,93 @@ impl Board {
     ///
     /// # Panics
     ///
-    /// In debug builds, if the incremental key update disagrees with a recompute, or if the
-    /// move is not applicable.
+    /// If no piece stands on the move's origin square, or if a capture names an empty
+    /// destination. In debug builds, additionally if the incremental key update disagrees
+    /// with a recompute.
     #[must_use]
     pub fn apply_move(self, mv: Move) -> Self {
-        let _ = mv;
-        todo!("Board::apply_move")
+        let mover = self.side_to_move();
+        let piece = self
+            .piece_at(mv.from())
+            .expect("apply_move requires a piece on the origin square");
+
+        let mut board = self;
+
+        // 1. The victim leaves first, so that placing the mover on the destination is
+        //    always an addition to an empty square. En passant is the case that makes this
+        //    ordering matter: the victim is NOT on the destination.
+        match mv.kind() {
+            MoveKind::EnPassant => {
+                let square = en_passant_victim_square(mv.to(), mover)
+                    .expect("an en-passant destination always has a square behind it");
+                let victim = Piece::new(mover.flip(), PieceKind::Pawn);
+                board.toggle(victim, square);
+            }
+            MoveKind::Capture | MoveKind::PromoCapture(_) => {
+                let victim = self
+                    .piece_at(mv.to())
+                    .expect("a capture requires a piece on the destination");
+                board.toggle(victim, mv.to());
+            }
+            _ => {}
+        }
+
+        // 2. The mover leaves its origin and arrives — as a different piece, if promoting.
+        board.toggle(piece, mv.from());
+        match mv.kind() {
+            MoveKind::Promotion(kind) | MoveKind::PromoCapture(kind) => {
+                board.toggle(Piece::new(mover, kind), mv.to());
+            }
+            _ => board.toggle(piece, mv.to()),
+        }
+
+        // 3. Castling moves a rook too.
+        if let Some((rook_from, rook_to)) = castling_rook_squares(mv.kind(), mover) {
+            let rook = Piece::new(mover, PieceKind::Rook);
+            board.toggle(rook, rook_from);
+            board.toggle(rook, rook_to);
+        }
+
+        // 4. Rights are revoked by BOTH squares. Applying the table to `to` as well as to
+        //    `from` is what makes a rook CAPTURED on its home square lose the right, not
+        //    only a rook that moves — and it is what makes a promotion-capture onto a
+        //    corner do the same.
+        let mut rights = self.castling();
+        for square in [mv.from(), mv.to()] {
+            if let Some(lost) = CastlingRights::from_bits(RIGHTS_LOST[square.index()]) {
+                rights = rights.without(lost);
+            }
+        }
+
+        // 5. A double push sets the en-passant file, whether or not a capture is available
+        //    (D-0019). Every other move clears it.
+        let ep = match mv.kind() {
+            MoveKind::DoublePawnPush => Some(double_push_file(mv.to())),
+            _ => None,
+        };
+
+        // 6. The clocks. Castling resets neither: it is not a pawn move and not a capture.
+        let halfmove = if piece.kind() == PieceKind::Pawn || mv.is_capture() {
+            0
+        } else {
+            self.halfmove_clock().saturating_add(1)
+        };
+        let fullmove = match mover {
+            Color::Black => self.fullmove_number().saturating_add(1),
+            Color::White => self.fullmove_number(),
+        };
+
+        board.set_state(mover.flip(), rights, ep, halfmove, fullmove);
+
+        // The recompute reads the mailbox while the incremental update wrote bitboards,
+        // mailbox and keys together, so this is not the same computation twice.
+        debug_assert!(
+            board.check_invariants().is_ok(),
+            "applying {mv} to {} produced an inconsistent board: {:?}",
+            self.to_fen(),
+            board.check_invariants()
+        );
+        board
     }
 
     /// Apply a move after checking its structural preconditions.
@@ -409,7 +507,131 @@ impl Board {
     ///
     /// Returns [`MoveNotApplicable`] describing the first precondition that fails.
     pub fn try_apply_move(self, mv: Move) -> Result<Self, MoveNotApplicable> {
-        let _ = mv;
-        todo!("Board::try_apply_move")
+        let mover = self.side_to_move();
+        let piece = self
+            .piece_at(mv.from())
+            .ok_or(MoveNotApplicable::NoPieceOnFrom)?;
+        if piece.color() != mover {
+            return Err(MoveNotApplicable::NotSideToMove);
+        }
+        let destination = self.piece_at(mv.to());
+        if destination.is_some_and(|p| p.color() == mover) {
+            return Err(MoveNotApplicable::OwnPieceOnDestination);
+        }
+
+        let kind = mv.kind();
+        let disagrees = Err(MoveNotApplicable::KindDisagreesWithBoard { claimed: kind });
+        let last_rank = match mover {
+            Color::White => 7,
+            Color::Black => 0,
+        };
+
+        match kind {
+            MoveKind::Quiet if destination.is_some() => return disagrees,
+            MoveKind::Capture if destination.is_none() => return disagrees,
+            MoveKind::EnPassant => {
+                if piece.kind() != PieceKind::Pawn || destination.is_some() {
+                    return disagrees;
+                }
+                if self.ep_square() != Some(mv.to()) {
+                    return Err(MoveNotApplicable::NotTheEnPassantSquare);
+                }
+            }
+            MoveKind::Promotion(_) | MoveKind::PromoCapture(_) => {
+                if piece.kind() != PieceKind::Pawn || mv.to().rank() != last_rank {
+                    return Err(MoveNotApplicable::NotAPromotion);
+                }
+                if matches!(kind, MoveKind::PromoCapture(_)) == destination.is_none() {
+                    return disagrees;
+                }
+            }
+            MoveKind::DoublePawnPush => {
+                let home_rank = match mover {
+                    Color::White => 1,
+                    Color::Black => 6,
+                };
+                let skipped = mv
+                    .from()
+                    .offset_rank(if mover == Color::White { 1 } else { -1 });
+                if piece.kind() != PieceKind::Pawn
+                    || mv.from().rank() != home_rank
+                    || mv.from().file() != mv.to().file()
+                    || mv.from().rank().abs_diff(mv.to().rank()) != 2
+                    || destination.is_some()
+                    || skipped.is_none_or(|square| self.piece_at(square).is_some())
+                {
+                    return Err(MoveNotApplicable::NotADoublePush);
+                }
+            }
+            MoveKind::KingCastle | MoveKind::QueenCastle => {
+                let right = match (kind, mover) {
+                    (MoveKind::KingCastle, Color::White) => CastlingRights::WHITE_KING,
+                    (MoveKind::QueenCastle, Color::White) => CastlingRights::WHITE_QUEEN,
+                    (MoveKind::KingCastle, Color::Black) => CastlingRights::BLACK_KING,
+                    _ => CastlingRights::BLACK_QUEEN,
+                };
+                if !self.castling().contains(right) {
+                    return Err(MoveNotApplicable::CastlingRightAbsent);
+                }
+                for index in castling_path(kind, mover) {
+                    let square =
+                        Square::from_index(*index).expect("the castling path is on the board");
+                    if self.piece_at(square).is_some() {
+                        return Err(MoveNotApplicable::CastlingPathOccupied);
+                    }
+                }
+            }
+            MoveKind::Quiet | MoveKind::Capture => {}
+        }
+
+        Ok(self.apply_move(mv))
+    }
+}
+
+/// The square the pawn captured en passant actually stands on.
+///
+/// Not the destination: the capturing pawn lands *behind* its victim. Getting this wrong is
+/// the classic en-passant bug, and it leaves a phantom pawn on the board that no FEN test
+/// notices until a perft count is off by thousands.
+#[must_use]
+pub(crate) fn en_passant_victim_square(to: Square, mover: Color) -> Option<Square> {
+    match mover {
+        Color::White => to.offset_rank(-1),
+        Color::Black => to.offset_rank(1),
+    }
+}
+
+/// The file a double push to `to` leaves as the en-passant file.
+#[must_use]
+pub(crate) fn double_push_file(to: Square) -> File {
+    to.file()
+}
+
+/// The rook's origin and destination for a castling move.
+#[must_use]
+pub(crate) fn castling_rook_squares(kind: MoveKind, color: Color) -> Option<(Square, Square)> {
+    let (from_index, to_index) = match (kind, color) {
+        (MoveKind::KingCastle, Color::White) => (7u8, 5u8),
+        (MoveKind::QueenCastle, Color::White) => (0, 3),
+        (MoveKind::KingCastle, Color::Black) => (63, 61),
+        (MoveKind::QueenCastle, Color::Black) => (56, 59),
+        _ => return None,
+    };
+    Some((
+        Square::from_index(from_index)?,
+        Square::from_index(to_index)?,
+    ))
+}
+
+/// The squares that must be empty between the king and the rook.
+#[must_use]
+pub(crate) fn castling_path(kind: MoveKind, color: Color) -> &'static [u8] {
+    match (kind, color) {
+        (MoveKind::KingCastle, Color::White) => &[5, 6],
+        // b1 must be empty for queen-side castling even though the king never crosses it.
+        (MoveKind::QueenCastle, Color::White) => &[1, 2, 3],
+        (MoveKind::KingCastle, Color::Black) => &[61, 62],
+        (MoveKind::QueenCastle, Color::Black) => &[57, 58, 59],
+        _ => &[],
     }
 }
