@@ -10,6 +10,9 @@
 use std::error::Error;
 use std::fmt;
 
+use crate::board::Board;
+use crate::fen::FenError;
+
 /// The perft oracle fixture, embedded at compile time.
 ///
 /// Declared exactly once in the workspace. A missing or renamed fixture is a **compile
@@ -160,12 +163,13 @@ pub enum OracleError {
         /// The repeated identifier.
         id: String,
     },
-    /// A FEN failed structural validation.
+    /// A FEN failed validation.
     MalformedFen {
         /// 1-based line number in the fixture.
         line: usize,
-        /// What was wrong with it.
-        reason: String,
+        /// Why the FEN was rejected. Typed rather than stringly, so a caller can branch on
+        /// the cause — the deferral D-0014 recorded against issue #4, closed by D-0022.
+        source: FenError,
     },
     /// A position carried no depth data at all.
     NoCounts {
@@ -228,8 +232,8 @@ impl fmt::Display for OracleError {
             Self::DuplicateId { line, id } => {
                 write!(f, "line {line}: duplicate position id {id:?}")
             }
-            Self::MalformedFen { line, reason } => {
-                write!(f, "line {line}: malformed FEN: {reason}")
+            Self::MalformedFen { line, source } => {
+                write!(f, "line {line}: malformed FEN: {source}")
             }
             Self::NoCounts { line } => write!(f, "line {line}: position has no depth counts"),
             Self::DepthOutOfRange { line, token } => {
@@ -244,7 +248,14 @@ impl fmt::Display for OracleError {
     }
 }
 
-impl Error for OracleError {}
+impl Error for OracleError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::MalformedFen { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
 
 /// Parse the oracle fixture into one [`PerftCase`] per position, in file order.
 ///
@@ -330,7 +341,7 @@ pub fn parse(text: &str) -> Result<Vec<PerftCase<'_>>, OracleError> {
             });
         }
 
-        validate_fen(fen).map_err(|reason| OracleError::MalformedFen { line, reason })?;
+        validate_fen(fen).map_err(|source| OracleError::MalformedFen { line, source })?;
 
         let counts = parse_counts(line, counts_field)?;
         if counts.is_empty() {
@@ -346,24 +357,19 @@ pub fn parse(text: &str) -> Result<Vec<PerftCase<'_>>, OracleError> {
     Ok(cases)
 }
 
-/// Check that `fen` is structurally well-formed.
+/// Check that `fen` names a position this crate can represent.
 ///
-/// Structural, plus the one plausibility rule that costs nothing and catches real
-/// transcription damage: **exactly one king per side**. That rule is strictly speaking
-/// about legality rather than structure, and it is applied deliberately — a FEN with two
-/// white kings is well-formed but is never a chess position, and in an oracle fixture it
-/// means a rank was mistyped.
+/// A three-line delegate to [`Board::from_fen`], which is the point: before issue #4 this
+/// function was a second, independent FEN validator returning `Result<(), String>`, and
+/// D-0014 recorded that as a deferral — two parsers can drift, and a caller could not
+/// branch on why a FEN was rejected. There is now one parser (D-0022).
 ///
-/// Everything beyond that is out of scope and belongs to issue #4, which needs a
-/// `Position` to express it: side-not-to-move in check, pawns on the first or eighth rank,
-/// castling rights without the matching rook, en passant squares with no pawn to capture.
-///
-/// Accepts four-field FENs as well as six-field ones, because the published Kiwipete FEN
-/// omits the halfmove and fullmove counters and is stored as published (D-0008).
+/// The four-field form is still accepted, because the published Kiwipete FEN is stored
+/// that way and D-0008 forbids changing it.
 ///
 /// # Errors
 ///
-/// Returns a human-readable reason. The caller attaches the line number.
+/// Returns the [`FenError`] the parser produced. The caller attaches the line number.
 ///
 /// # Examples
 ///
@@ -381,132 +387,20 @@ pub fn parse(text: &str) -> Result<Vec<PerftCase<'_>>, OracleError> {
 /// // A board needs exactly one king per side.
 /// assert!(validate_fen("8/8/8/8/8/8/8/4K3 w - - 0 1").is_err());
 /// ```
-pub fn validate_fen(fen: &str) -> Result<(), String> {
-    let fields: Vec<&str> = fen.split(' ').collect();
-    if fields.len() != 4 && fields.len() != 6 {
-        return Err(format!(
-            "expected 4 or 6 space-separated fields, found {}: {fen:?}",
-            fields.len()
-        ));
-    }
-
-    // --- 1. piece placement ---
-    let ranks: Vec<&str> = fields[0].split('/').collect();
-    if ranks.len() != 8 {
-        return Err(format!(
-            "piece placement must have 8 ranks, found {}",
-            ranks.len()
-        ));
-    }
-    let (mut white_kings, mut black_kings) = (0u32, 0u32);
-    for (i, rank) in ranks.iter().enumerate() {
-        let mut files = 0u32;
-        let mut previous_was_digit = false;
-        for ch in rank.chars() {
-            if ch.is_ascii_digit() {
-                if previous_was_digit {
-                    return Err(format!(
-                        "rank {} uses consecutive digits, which is not canonical FEN: {rank:?}",
-                        8 - i
-                    ));
-                }
-                previous_was_digit = true;
-            } else {
-                previous_was_digit = false;
-            }
-            match ch {
-                '1'..='8' => files += ch as u32 - '0' as u32,
-                'K' => {
-                    white_kings += 1;
-                    files += 1;
-                }
-                'k' => {
-                    black_kings += 1;
-                    files += 1;
-                }
-                'p' | 'n' | 'b' | 'r' | 'q' | 'P' | 'N' | 'B' | 'R' | 'Q' => files += 1,
-                _ => {
-                    return Err(format!("rank {} contains invalid character {ch:?}", 8 - i));
-                }
-            }
-        }
-        if files != 8 {
-            return Err(format!(
-                "rank {} describes {files} files, not 8: {rank:?}",
-                8 - i
-            ));
-        }
-    }
-    if white_kings != 1 || black_kings != 1 {
-        return Err(format!(
-            "expected exactly one king per side, found {white_kings} white and {black_kings} black"
-        ));
-    }
-
-    // --- 2. side to move ---
-    if fields[1] != "w" && fields[1] != "b" {
-        return Err(format!(
-            "side to move must be 'w' or 'b', found {:?}",
-            fields[1]
-        ));
-    }
-
-    // --- 3. castling availability ---
-    let castling = fields[2];
-    if castling != "-" {
-        if castling.is_empty() {
-            return Err("castling field is empty; use '-' for none".to_owned());
-        }
-        let mut seen = String::new();
-        for ch in castling.chars() {
-            if !"KQkq".contains(ch) {
-                return Err(format!("castling field contains invalid character {ch:?}"));
-            }
-            if seen.contains(ch) {
-                return Err(format!("castling field repeats {ch:?}"));
-            }
-            seen.push(ch);
-        }
-    }
-
-    // --- 4. en passant target ---
-    let ep = fields[3];
-    if ep != "-" {
-        let bytes = ep.as_bytes();
-        let ok = bytes.len() == 2
-            && (b'a'..=b'h').contains(&bytes[0])
-            && (bytes[1] == b'3' || bytes[1] == b'6');
-        if !ok {
-            return Err(format!(
-                "en passant target must be '-' or a square on rank 3 or 6, found {ep:?}"
-            ));
-        }
-        // The rank follows from the side to move: after white pushes a pawn two squares
-        // the target is on rank 3 and it is black's turn, and vice versa. A contradiction
-        // here is decidable without a board, so it is caught here rather than in #4.
-        let expected_rank = if fields[1] == "w" { b'6' } else { b'3' };
-        if bytes[1] != expected_rank {
-            return Err(format!(
-                "en passant target {ep:?} contradicts the side to move ({}): expected rank {}",
-                fields[1],
-                char::from(expected_rank)
-            ));
-        }
-    }
-
-    // --- 5, 6. halfmove clock and fullmove number, when present ---
-    if fields.len() == 6 {
-        for (name, value) in [
-            ("halfmove clock", fields[4]),
-            ("fullmove number", fields[5]),
-        ] {
-            if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
-                return Err(format!("{name} must be a decimal number, found {value:?}"));
-            }
-        }
-    }
-
-    Ok(())
+///
+/// The rejection is typed, so a caller can say which rule was broken:
+///
+/// ```
+/// use boid_board::fen::FenError;
+/// use boid_board::perft::oracle::validate_fen;
+///
+/// assert_eq!(
+///     validate_fen("4k3/8/8/8/8/8/8/4K4 w - - 0 1"),
+///     Err(FenError::WrongFileCount { rank: 1, found: 9 })
+/// );
+/// ```
+pub fn validate_fen(fen: &str) -> Result<(), FenError> {
+    Board::from_fen(fen).map(|_| ())
 }
 
 /// Parse one position's whitespace-separated `depth:nodes<flag>` tokens.
