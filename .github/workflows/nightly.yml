@@ -27,6 +27,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+      - name: Install pinned toolchain
+        run: ./scripts/setup-toolchain.sh
       - run: ./scripts/setup-stockfish.sh
       - run: cargo test --workspace -- --nocapture
 
@@ -40,6 +42,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+      - name: Install pinned toolchain
+        run: ./scripts/setup-toolchain.sh
       - name: Install libpq
         # autumn-web's default features reach diesel/postgres. Today pq-sys emits no link
         # directive so nothing needs libpq, but that is latent rather than absent, and one
@@ -60,5 +64,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # Deliberately no rust-cache: this job exists to prove a clean checkout builds.
+      - name: Install pinned toolchain
+        run: ./scripts/setup-toolchain.sh
       - run: cargo build --workspace --locked
       - run: cargo test --workspace --locked

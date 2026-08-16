@@ -347,8 +347,18 @@ Decision:     Edition 2024, `resolver = "3"`, MSRV `1.94`, and the toolchain pin
   inner `unsafe { }` blocks inside any `unsafe fn` -- because `unsafe_op_in_unsafe_fn` is a
   warning in edition 2024 and therefore an ERROR under `-D warnings`.
 
+  The pin has one measured cost. A runner without that exact toolchain downloads it on the
+  first cargo invocation, and that download is occasionally reset mid-flight -- observed on
+  GitHub Actions as `component download failed for rust-std-x86_64-unknown-linux-gnu:
+  Connection reset by peer (os error 104)`, which failed one job while four others on the
+  same run succeeded. A network hiccup that reads as a build failure is exactly the noise
+  that teaches people to ignore red CI, so every CI job installs the toolchain through
+  `scripts/setup-toolchain.sh`, which retries with backoff and then fails loudly rather
+  than letting the error surface inside an unrelated cargo command.
+
 Rule:         Do not introduce `unsafe` outside `boid-board`, and do not introduce it there
-  without a module-scoped allow and a `// SAFETY:` comment on every block.
+  without a module-scoped allow and a `// SAFETY:` comment on every block. Every CI job
+  that runs cargo must first run `scripts/setup-toolchain.sh`.
 
 Evidence:     `rustc 1.94.1`, `cargo 1.94.1`; `rust-toolchain.toml` is committed.
 
