@@ -115,6 +115,28 @@ fn coincident_weight(separation_radius: f64) -> f64 {
 ///
 /// Toroidal: the escape direction comes from [`World::displacement`], so a
 /// neighbour across a seam pushes the short way round.
+///
+/// # The radius is exclusive — and the neighbour query's is not
+///
+/// `d < separation_radius`, so a neighbour at **exactly** the radius pushes
+/// with exactly [`Vec2::ZERO`]. The neighbour query is the other way round:
+/// [`crate::neighbors`] uses `d <= neighbor_radius`, so an agent at exactly
+/// the neighbourhood boundary **is** a flockmate. The asymmetry is deliberate,
+/// because the two radii answer different kinds of question:
+///
+/// * `neighbor_radius` decides **membership** of a set. The closed ball is the
+///   right answer there: an agent exactly on the boundary is as visible as one
+///   a millionth of a unit inside, and excluding it would make a run's
+///   neighbour sets depend on the last bit of a distance computation.
+/// * `separation_radius` marks **where a behaviour has switched off**. The
+///   value at the boundary is the point where the repulsion has just faded
+///   out, so the boundary belongs to the "off" side.
+///
+/// `sim::validate` permits `separation_radius == neighbor_radius`, and this is
+/// what that case means: the whole neighbourhood repels *except* its outermost
+/// rim. The same strict `<` is used by
+/// [`metrics::collision_count`](crate::metrics::collision_count), so "just
+/// touching" is consistently not-yet-interacting across the kernel.
 #[must_use]
 pub fn separation(
     agents: &[Agent],
@@ -239,7 +261,9 @@ pub fn goal_seek(agents: &[Agent], world: &World, index: usize, goal: Option<Vec
 /// Toroidal: the radial direction comes from [`World::displacement`], so an
 /// obstacle just across a seam is dodged rather than ignored.
 ///
-/// Obstacles with a non-positive or non-finite radius contribute nothing.
+/// Obstacles with a non-positive or non-finite radius contribute nothing, and
+/// so do obstacles so large that their influence band
+/// ([`obstacle_influence_radius`]) overflows to infinity.
 #[must_use]
 pub fn obstacle_avoidance(
     agents: &[Agent],
@@ -257,12 +281,38 @@ pub fn obstacle_avoidance(
     force
 }
 
+/// How far an obstacle of this radius reaches: [`OBSTACLE_INFLUENCE`] times it.
+///
+/// Public because `sim::validate` reports an obstacle whose band is unusable,
+/// and the validator must ask the force law rather than re-deriving the
+/// multiple — two copies of the same constant is two chances to disagree about
+/// which obstacles a run can actually use.
+///
+/// The result is **not** guaranteed finite: a radius above roughly `8.99e307`
+/// is itself finite (so [`crate::world::World`] geometry and the plain radius
+/// checks accept it) while its band overflows to `+inf`. Callers must handle
+/// that; see [`obstacle_push`].
+#[must_use]
+pub fn obstacle_influence_radius(radius: f64) -> f64 {
+    radius * OBSTACLE_INFLUENCE
+}
+
 /// The repulsion a single obstacle applies to one agent.
 fn obstacle_push(me: &Agent, world: &World, obstacle: &Obstacle) -> Vec2 {
     if obstacle.radius <= 0.0 || !obstacle.radius.is_finite() {
         return Vec2::ZERO;
     }
-    let influence = obstacle.radius * OBSTACLE_INFLUENCE;
+    let influence = obstacle_influence_radius(obstacle.radius);
+    // A finite radius does not imply a finite band: `radius * 2` overflows
+    // above ~8.99e307, and the strength below would then be `inf/inf` = `NaN`.
+    // `blend` finishes with `Vec2::limit`, which maps a `NaN` total to `ZERO`,
+    // so that `NaN` would not surface as a broken run — it would silently
+    // delete every steering behaviour from every agent for the whole run.
+    // The radius check above cannot catch it, because the overflow is a
+    // property of the band, not of the radius.
+    if !influence.is_finite() {
+        return Vec2::ZERO;
+    }
     let to_center = world.displacement(me.pos, obstacle.center);
     let distance = to_center.length();
     // Positive comparison so a `NaN` distance falls outside the band.
@@ -434,6 +484,43 @@ mod tests {
             f,
             Vec2::ZERO,
             "a neighbour beyond the radius contributes nothing"
+        );
+    }
+
+    #[test]
+    fn separation_treats_its_radius_as_a_strict_threshold() {
+        // Boundary semantics, pinned. `separation` uses `d < radius` while the
+        // neighbour query uses `d <= radius`, and until now nothing
+        // distinguished the two: turning `<` into `<=` here left the whole
+        // suite green, because every other separation test sits comfortably
+        // inside or outside the radius rather than exactly on it.
+        let w = w100();
+        let exactly = [at(0, Vec2::new(10.0, 10.0)), at(1, Vec2::new(15.0, 10.0))];
+        assert_eq!(
+            w.distance(exactly[0].pos, exactly[1].pos),
+            5.0,
+            "precondition: the pair is exactly the radius apart"
+        );
+        assert_eq!(
+            separation(&exactly, &w, 0, &[1], 5.0),
+            Vec2::ZERO,
+            "a neighbour at exactly the separation radius must not repel"
+        );
+
+        // One ULP inside, and the repulsion is on — so the assertion above is
+        // about the boundary and not about an inert scenario.
+        let inside = f64::from_bits(15.0_f64.to_bits() - 1);
+        let just_inside = [at(0, Vec2::new(10.0, 10.0)), at(1, Vec2::new(inside, 10.0))];
+        let f = separation(&just_inside, &w, 0, &[1], 5.0);
+        assert!(f.length() > 0.0, "one ULP inside the radius must repel: {f:?}");
+        assert!(f.x < 0.0, "and must still push away: {f:?}");
+
+        // The other half of the documented asymmetry: at that same distance,
+        // the neighbour query counts the agent IN.
+        assert_eq!(
+            crate::neighbors::neighbors_naive(&exactly, &w, 0, 5.0),
+            vec![1],
+            "the neighbour radius is inclusive where the separation radius is not"
         );
     }
 
@@ -758,6 +845,57 @@ mod tests {
             "a stationary agent must not be stranded: {f:?}"
         );
         assert_eq!(f, obstacle_avoidance(&agents, &w100(), 0, &rocks));
+    }
+
+    #[test]
+    fn an_obstacle_whose_influence_band_overflows_contributes_nothing() {
+        // `validate` rejects a non-finite obstacle *radius*, but a radius of
+        // 1e308 is finite and accepted — and the influence band is
+        // `radius * OBSTACLE_INFLUENCE`, which overflows to `+inf` for any
+        // radius above about 8.99e307. The strength is then
+        // `(inf - distance) / (inf - radius)` = `inf / inf` = `NaN`, which is
+        // the exact failure the module's totality rule exists to forbid.
+        let agents = [at(0, Vec2::new(10.0, 10.0))];
+        for radius in [1e308, f64::MAX, 9e307] {
+            let rocks = [rock(Vec2::new(50.0, 50.0), radius)];
+            let f = obstacle_avoidance(&agents, &w100(), 0, &rocks);
+            assert!(
+                f.is_finite(),
+                "radius {radius:e} produced a non-finite force: {f:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_obstacle_with_an_overflowing_influence_band_does_not_disable_the_flock() {
+        // Why the NaN above is worse than it looks. `blend` finishes with
+        // `Vec2::limit`, which is total and maps a `NaN` total to `ZERO`. So a
+        // single absurd obstacle does not produce a visibly broken run — it
+        // silently deletes **every** steering behaviour from **every** agent,
+        // for the whole run, with nothing logged and no invariant breached.
+        let (mut params, agents, neighbors) = all_five_active();
+        let before = blend(&params, &agents, &params.world, 0, &neighbors);
+        assert!(before.length() > 0.0, "the base scenario must steer");
+
+        params.obstacles.push(rock(Vec2::new(90.0, 90.0), 1e308));
+        let after = blend(&params, &agents, &params.world, 0, &neighbors);
+        assert!(after.is_finite(), "blend went non-finite: {after:?}");
+        assert!(
+            after.length() > 0.0,
+            "one absurd obstacle silently switched off all five behaviours: \
+             {before:?} became {after:?}"
+        );
+    }
+
+    #[test]
+    fn the_influence_radius_is_the_force_laws_own_band() {
+        // `sim::validate` reports an obstacle whose influence band overflows,
+        // and it has to ask this module rather than re-deriving the multiple,
+        // or the two can drift apart into disagreeing about which obstacles
+        // are usable.
+        assert_eq!(obstacle_influence_radius(5.0), 10.0);
+        assert!(!obstacle_influence_radius(1e308).is_finite());
+        assert!(obstacle_influence_radius(8.9e307).is_finite());
     }
 
     // ---------------------------------------------------------------- AC-16

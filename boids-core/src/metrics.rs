@@ -20,8 +20,25 @@ use crate::world::{Agent, World};
 /// a persisted contract**: renaming one silently invalidates every stored
 /// frame and every chart reading them. Add fields rather than rename them.
 ///
-/// Every field is finite for every input — an empty frame reports zeros, never
-/// `NaN` — so a caller charting a series never has to filter the data.
+/// # Finiteness is a storage contract, not a nicety
+///
+/// JSON has no infinity: `serde_json` writes `+inf` as `null` and then
+/// **refuses to read it back**, so one non-finite field turns a stored frame
+/// into a row that can never be deserialized again. The claim below is
+/// therefore stated precisely and tested, not assumed.
+///
+/// **No field is ever `NaN`, for any input at all**, and an empty frame
+/// reports zeros rather than `0/0`. Three fields are finite unconditionally:
+/// `polarization` and `fraction_arrived` are fractions in `[0,1]`, and
+/// `mean_nearest_neighbor_distance` is purely positional and saturates at the
+/// world's half-diagonal however large the world is (see
+/// [`mean_nearest_neighbor_distance`]). `mean_speed` is finite whenever the
+/// individual speeds are — a velocity of `(f64::MAX, f64::MAX)` has an
+/// infinite *length*, which no averaging can repair — and `sim::step` clamps
+/// every velocity to `max_speed`, so every frame a run produces qualifies.
+///
+/// So a caller charting a series of frames the kernel produced never has to
+/// filter the data.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FrameMetrics {
     /// Order parameter in `[0,1]`: magnitude of the mean unit heading.
@@ -61,12 +78,16 @@ pub fn frame_metrics(agents: &[Agent], params: &SimParams) -> FrameMetrics {
 }
 
 /// Mean speed across the flock. `0.0` for an empty flock.
+///
+/// Divides before summing for the same reason as
+/// [`mean_nearest_neighbor_distance`]: the mean of `n` finite speeds is
+/// representable even where their sum is not.
 fn mean_speed(agents: &[Agent]) -> f64 {
     if agents.is_empty() {
         return 0.0;
     }
-    let total: f64 = agents.iter().map(|a| a.vel.length()).sum();
-    total / agents.len() as f64
+    let count = agents.len() as f64;
+    agents.iter().map(|a| a.vel.length() / count).sum()
 }
 
 /// Fraction of agents within `goal_arrival_radius` of the goal, in `[0,1]`.
@@ -141,28 +162,87 @@ pub fn polarization(agents: &[Agent]) -> f64 {
 /// An agent is never its own nearest neighbour: the comparison is by slice
 /// index, so duplicate `id`s or coincident positions cannot make an agent
 /// match itself.
+///
+/// **Always finite, for any world and any positions.** Two separate overflows
+/// have to be kept out, and neither is hypothetical: `sim::validate` accepts a
+/// world of any positive finite size, and a `+inf` here is not a cosmetic
+/// blemish but an unreadable `frames.metrics` row (see [`FrameMetrics`]).
+///
+/// * The per-agent scan compares **squared** distances, for one `sqrt` per
+///   agent instead of one per pair. [`World::distance_squared`] is `x*x + y*y`
+///   and saturates for a world wider than about `1.3e154`, where
+///   [`World::distance`]'s `hypot` still succeeds — so a saturated scan is
+///   redone the slow, exact way rather than reported as infinity.
+/// * The mean divides **before** summing. Each nearest distance is bounded by
+///   the world's half-diagonal and so is their mean, but the *sum* of `n` of
+///   them is not; one extra division per agent costs nothing measurable and
+///   removes the second overflow entirely.
 #[must_use]
 pub fn mean_nearest_neighbor_distance(agents: &[Agent], world: &World) -> f64 {
     if agents.len() < 2 {
         return 0.0;
     }
-    let mut total = 0.0;
-    for (i, a) in agents.iter().enumerate() {
-        let mut nearest_squared = f64::INFINITY;
-        for (j, b) in agents.iter().enumerate() {
-            if i == j {
-                continue;
-            }
-            // Compare squared distances: one `sqrt` per agent instead of one
-            // per pair, and the ordering is identical.
-            let d2 = world.distance_squared(a.pos, b.pos);
-            if d2 < nearest_squared {
-                nearest_squared = d2;
-            }
-        }
-        total += nearest_squared.sqrt();
+    let count = agents.len() as f64;
+    let mut mean = 0.0;
+    for i in 0..agents.len() {
+        mean += nearest_distance(agents, world, i) / count;
     }
-    total / agents.len() as f64
+    mean
+}
+
+/// Toroidal distance from `agents[i]` to its nearest *other* agent, or `0.0`
+/// if there is no other agent. Never `NaN` and never infinite.
+fn nearest_distance(agents: &[Agent], world: &World, i: usize) -> f64 {
+    let me = agents[i].pos;
+    let others = || {
+        agents
+            .iter()
+            .enumerate()
+            .filter(move |(j, _)| *j != i)
+            .map(|(_, b)| b.pos)
+    };
+
+    // Fast path: squared distances, one `sqrt` at the end.
+    let mut nearest_squared = f64::INFINITY;
+    for other in others() {
+        let d2 = world.distance_squared(me, other);
+        if d2 < nearest_squared {
+            nearest_squared = d2;
+        }
+    }
+    if nearest_squared.is_finite() {
+        return nearest_squared.sqrt();
+    }
+
+    // Every squared distance overflowed, so the ordering above carries no
+    // information. `World::distance` uses `hypot`, which does not overflow
+    // where `x*x + y*y` does, so rescan with it.
+    let nearest = others().fold(f64::INFINITY, |best, other| {
+        best.min(world.distance(me, other))
+    });
+    if nearest.is_finite() {
+        return nearest;
+    }
+    // Unreachable for any world with finite dimensions, but the finiteness
+    // claim is a contract rather than an expectation: report the largest
+    // distance the torus admits rather than an infinity that cannot be
+    // stored.
+    half_diagonal(world)
+}
+
+/// The largest distance this world's torus admits: half of its diagonal.
+///
+/// Always finite — a degenerate axis contributes nothing, and the halving
+/// keeps `hypot` inside range even for a world sized `f64::MAX`.
+fn half_diagonal(world: &World) -> f64 {
+    let half = |size: f64| {
+        if size.is_finite() && size > 0.0 {
+            size / 2.0
+        } else {
+            0.0
+        }
+    };
+    half(world.width).hypot(half(world.height))
 }
 
 /// Number of **unordered** agent pairs closer than `radius`, under toroidal
@@ -292,6 +372,30 @@ pub fn is_stuck(
 /// circle, average the resulting unit vectors, and read the angle back — so
 /// the same pair yields `x≈0`, the point they actually straddle.
 ///
+/// # NOT BIT-PORTABLE — never hash, fingerprint, or persist this value
+///
+/// This is the **only** function in the kernel that uses trigonometry, and it
+/// is the only one whose result may differ between two machines running the
+/// same code on the same input. `sin`, `cos` and `atan2` are not
+/// correctly-rounded operations in IEEE 754 and are not required to agree
+/// between libm implementations, CPU architectures, or optimisation settings;
+/// the difference is in the last bits, which is exactly the resolution at
+/// which the reproducibility contract operates.
+///
+/// Everything on the path from [`crate::sim::SimState::seeded`] through
+/// [`crate::sim::step`] to [`crate::hash::state_hash`] avoids trigonometry for
+/// that reason, and the test
+/// `sim::tests::the_kernel_uses_trigonometry_in_one_place_only` pins that it
+/// stays that way. This function is deliberately
+/// outside that path: nothing in [`FrameMetrics`] is derived from it, and
+/// nothing stores it.
+///
+/// So it is safe to **display** — a centroid marker on a chart, a debug
+/// readout — and unsafe to compare across machines, feed into a hash, write to
+/// `runs.final_state_hash` or `frames.state_hash`, or use as evidence that two
+/// runs agree. Anything of that kind needs a trig-free circular mean, which is
+/// a different function and should be written as one.
+///
 /// **Degenerate cases.** An empty flock returns [`Vec2::ZERO`]. A flock spread
 /// evenly around an axis has no meaningful centre on that axis; the averaged
 /// vector is then the origin and `atan2(0,0) = 0` puts the result at
@@ -317,6 +421,9 @@ pub fn toroidal_centroid(agents: &[Agent], world: &World) -> Vec2 {
 ///
 /// Returns a value in `[0,size)`, or `0.0` when the axis is degenerate or the
 /// values cancel exactly.
+///
+/// **The kernel's only trigonometry, and the only cross-machine-unstable
+/// arithmetic in it.** See [`toroidal_centroid`] for what that rules out.
 fn circular_mean_axis(values: impl Iterator<Item = f64>, count: usize, size: f64) -> f64 {
     if count == 0 || !size.is_finite() || size <= 0.0 {
         return 0.0;
@@ -540,6 +647,56 @@ mod tests {
     }
 
     #[test]
+    fn ac24_mean_nearest_neighbor_distance_is_finite_in_an_enormous_world() {
+        // `World::distance_squared` is `x*x + y*y`, which saturates to `+inf`
+        // for a world wider than about 1.3e154 — long before `World::distance`
+        // does, since that goes through `hypot`. Every squared distance is
+        // then `+inf`, `nearest_squared` never improves on its `INFINITY`
+        // seed, and the mean comes out `+inf`.
+        //
+        // `sim::validate` accepts worlds of this size, and the whole point of
+        // `FrameMetrics`' finiteness claim is that a caller never has to
+        // filter the series.
+        for size in [1e155, 1e200, 1e300, f64::MAX / 2.0, f64::MAX] {
+            let world = World::new(size, size);
+            let flock = [
+                at(0, 0.0, 0.0),
+                at(1, size * 0.25, size * 0.5),
+                at(2, size * 0.75, size * 0.125),
+            ];
+            let d = mean_nearest_neighbor_distance(&flock, &world);
+            assert!(d.is_finite(), "world {size:e}: mean NND was {d}");
+            assert!(d > 0.0, "world {size:e}: three spread agents gave {d}");
+        }
+    }
+
+    #[test]
+    fn a_non_finite_metric_cannot_survive_the_persisted_json_round_trip() {
+        // Why the finiteness claim is load-bearing rather than cosmetic.
+        // `FrameMetrics` is written to the `frames.metrics` JSONB column;
+        // JSON has no infinity, so `serde_json` emits `null` and then refuses
+        // to read it back. A single `+inf` metric therefore does not produce a
+        // visibly odd chart — it produces a stored row that can never be
+        // deserialized again.
+        let broken = FrameMetrics {
+            polarization: 0.5,
+            mean_nearest_neighbor_distance: f64::INFINITY,
+            collisions: 0,
+            mean_speed: 1.0,
+            fraction_arrived: 0.0,
+        };
+        let json = serde_json::to_string(&broken).expect("serialize");
+        assert!(
+            json.contains("\"mean_nearest_neighbor_distance\":null"),
+            "expected +inf to serialize as null, got {json}"
+        );
+        assert!(
+            serde_json::from_str::<FrameMetrics>(&json).is_err(),
+            "a null metric must not deserialize; the stored row is unreadable"
+        );
+    }
+
+    #[test]
     fn ac25_two_mutually_overlapping_agents_are_one_collision_not_two() {
         // The headline of AC-25: the pair is unordered. An implementation that
         // counts every ordered (i,j) pair reports 2 here.
@@ -600,17 +757,71 @@ mod tests {
     }
 
     #[test]
-    fn ac25_collision_count_never_exceeds_the_number_of_pairs() {
+    fn ac25_collision_count_matches_an_independent_ordered_pair_scan() {
+        // Replaces an assertion that could not fail. `c <= C(n,2)` is
+        // guaranteed by the SHAPE of `for b in &agents[i + 1..]`, so asserting
+        // it tested the loop bounds, not the count — no mutation of the body
+        // could break it.
+        //
+        // The count itself is what AC-25 is about, so check it against a
+        // reference written the other way round: every ORDERED pair, using
+        // `World::distance` rather than the implementation's squared compare,
+        // then halved. That reference disagrees the moment the real count
+        // double-counts a pair, skips one, includes an agent against itself,
+        // or measures distance non-toroidally — and it still pins the bound as
+        // a corollary rather than as the whole test.
+        const RADIUS: f64 = 3.0;
         let w = w100();
         let mut r = crate::rng::Rng::seeded(0x2525);
+        let mut saw_a_collision = false;
         for _ in 0..2_000 {
             let n = (r.next_f64() * 12.0) as usize;
-            // A small world crammed with agents so collisions actually happen.
+            // A small patch of a large world, crammed so collisions happen and
+            // so seam-crossing pairs are reachable.
             let flock: Vec<Agent> = (0..n)
                 .map(|i| at(i as u32, r.range(0.0, 10.0), r.range(0.0, 10.0)))
                 .collect();
-            let c = collision_count(&flock, &w, 3.0);
+
+            let mut ordered = 0usize;
+            for (i, a) in flock.iter().enumerate() {
+                for (j, b) in flock.iter().enumerate() {
+                    if i != j && w.distance(a.pos, b.pos) < RADIUS {
+                        ordered += 1;
+                    }
+                }
+            }
+            assert_eq!(ordered % 2, 0, "an ordered scan must be symmetric");
+
+            let c = collision_count(&flock, &w, RADIUS);
+            assert_eq!(
+                c,
+                ordered / 2,
+                "counted {c} unordered pairs, but an ordered scan found \
+                 {ordered} ordered ones among {n} agents"
+            );
             assert!(c <= n * n.saturating_sub(1) / 2, "{c} exceeds C({n},2)");
+            saw_a_collision |= c > 0;
+        }
+        assert!(
+            saw_a_collision,
+            "no sampled flock collided at all; the comparison is vacuous"
+        );
+    }
+
+    #[test]
+    fn ac25_a_fully_coincident_flock_attains_the_pair_bound_exactly() {
+        // The upper bound is only meaningful if it is reachable. `n` agents on
+        // one point are `C(n,2)` colliding pairs — not `n`, not `n²`, not
+        // `n(n-1)`. An off-by-one in the pairing shows up here as a wrong
+        // number rather than as an inequality that still holds.
+        let w = w100();
+        for n in 0..12usize {
+            let flock: Vec<Agent> = (0..n).map(|i| at(i as u32, 30.0, 30.0)).collect();
+            assert_eq!(
+                collision_count(&flock, &w, 1.0),
+                n * n.saturating_sub(1) / 2,
+                "{n} coincident agents"
+            );
         }
     }
 
@@ -722,37 +933,92 @@ mod tests {
     fn frame_metrics_are_always_finite() {
         // Adversarial flocks: coincident agents, zero velocities, positions
         // far outside the world.
-        let p = params();
+        //
+        // Sampled across **world scales**, not just the 100x100 world the rest
+        // of this module uses. Scale is the axis the finiteness claim actually
+        // fails on: `World::distance_squared` saturates above about 1.3e154,
+        // and `sim::validate` accepts every one of these worlds. A tiny world
+        // is included for the opposite failure — subnormal distances and
+        // divisions that underflow.
         let mut r = crate::rng::Rng::seeded(0xF4A3);
-        for _ in 0..2_000 {
-            let n = (r.next_f64() * 15.0) as usize;
-            let flock: Vec<Agent> = (0..n)
-                .map(|i| {
-                    let coincident = r.next_f64() < 0.3;
-                    let pos = if coincident {
-                        Vec2::new(10.0, 10.0)
-                    } else {
-                        Vec2::new(r.range(-300.0, 300.0), r.range(-300.0, 300.0))
-                    };
-                    let vel = if r.next_f64() < 0.3 {
-                        Vec2::ZERO
-                    } else {
-                        Vec2::new(r.range(-5.0, 5.0), r.range(-5.0, 5.0))
-                    };
-                    agent(i as u32, pos, vel)
-                })
-                .collect();
-            let m = frame_metrics(&flock, &p);
-            assert!(
-                m.polarization.is_finite()
-                    && m.mean_nearest_neighbor_distance.is_finite()
-                    && m.mean_speed.is_finite()
-                    && m.fraction_arrived.is_finite(),
-                "non-finite metric: {m:?}"
-            );
-            assert!((0.0..=1.0).contains(&m.fraction_arrived));
-            assert!((0.0..=1.0).contains(&m.polarization));
+        for scale in [1e-300, 1e-8, 1.0, 100.0, 1e12, 1e154, 1e200, 1e307] {
+            let p = SimParams {
+                world: World::new(scale, scale * 0.5),
+                collision_radius: scale * 0.02,
+                goal: Some(Vec2::new(scale * 0.5, scale * 0.25)),
+                goal_arrival_radius: scale * 0.1,
+                ..params()
+            };
+            for _ in 0..250 {
+                let n = (r.next_f64() * 15.0) as usize;
+                let flock: Vec<Agent> = (0..n)
+                    .map(|i| {
+                        let coincident = r.next_f64() < 0.3;
+                        let pos = if coincident {
+                            Vec2::new(scale * 0.1, scale * 0.1)
+                        } else {
+                            Vec2::new(r.range(-3.0, 3.0) * scale, r.range(-3.0, 3.0) * scale)
+                        };
+                        let vel = if r.next_f64() < 0.3 {
+                            Vec2::ZERO
+                        } else {
+                            Vec2::new(r.range(-5.0, 5.0), r.range(-5.0, 5.0))
+                        };
+                        agent(i as u32, pos, vel)
+                    })
+                    .collect();
+                let m = frame_metrics(&flock, &p);
+                assert!(
+                    m.polarization.is_finite()
+                        && m.mean_nearest_neighbor_distance.is_finite()
+                        && m.mean_speed.is_finite()
+                        && m.fraction_arrived.is_finite(),
+                    "non-finite metric in a {scale:e}-scale world: {m:?}"
+                );
+                assert!((0.0..=1.0).contains(&m.fraction_arrived));
+                assert!((0.0..=1.0).contains(&m.polarization));
+                assert!(
+                    m.mean_nearest_neighbor_distance >= 0.0,
+                    "negative mean NND in a {scale:e}-scale world: {m:?}"
+                );
+
+                // And the whole struct must be *storable and reloadable*,
+                // which is the property finiteness is for: a `+inf` field
+                // serializes as `null` and then fails to deserialize, leaving
+                // an unreadable `frames.metrics` row. (Reload is asserted to
+                // succeed, not to be bit-exact: `FrameMetrics` is written as
+                // ordinary JSON numbers, whose parser is an ULP loose — see
+                // `sim::SimState` for the type where exactness is required
+                // and therefore built.)
+                let json = serde_json::to_string(&m).expect("serialize");
+                let back: FrameMetrics = serde_json::from_str(&json)
+                    .unwrap_or_else(|e| panic!("{m:?} could not be stored and reloaded: {e}"));
+                assert!(
+                    back.mean_nearest_neighbor_distance.is_finite()
+                        && back.mean_speed.is_finite()
+                        && back.polarization.is_finite()
+                        && back.fraction_arrived.is_finite(),
+                    "reloaded {back:?} is not finite"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn mean_speed_is_finite_even_where_the_total_speed_is_not() {
+        // The other overflow in the same family: every individual speed is
+        // finite and their mean is representable, but their *sum* is not.
+        let fast = f64::MAX / 2.0;
+        let flock: Vec<Agent> = (0..8)
+            .map(|i| agent(i, Vec2::ZERO, Vec2::new(fast, 0.0)))
+            .collect();
+        let m = frame_metrics(&flock, &params());
+        assert!(m.mean_speed.is_finite(), "mean speed was {}", m.mean_speed);
+        assert!(
+            (m.mean_speed - fast).abs() <= fast * 1e-12,
+            "expected ~{fast:e}, got {}",
+            m.mean_speed
+        );
     }
 
     #[test]

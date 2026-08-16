@@ -18,7 +18,16 @@
 //! * **Deterministic and reproducible.** The same `(params, seed)` yields the
 //!   same state hash in every process, on every platform (**AC-22**). No
 //!   ambient entropy, no trigonometry, no unordered-collection iteration
-//!   anywhere in the pipeline.
+//!   anywhere on the path from [`SimState::seeded`] through [`step`] to
+//!   [`crate::hash::state_hash`]. Trigonometry is singled out because `sin`,
+//!   `cos` and `atan2` are not correctly-rounded and are free to disagree
+//!   between libm implementations — a last-bit difference, which is precisely
+//!   the resolution a persisted hash compares at. The crate contains exactly
+//!   one trig-using function,
+//!   [`metrics::toroidal_centroid`](crate::metrics::toroidal_centroid); it is
+//!   off this path, nothing hashes or stores it, it carries a warning saying
+//!   so, and `the_kernel_uses_trigonometry_in_one_place_only` below fails if
+//!   that stops being true.
 //! * **Checkpoint-safe.** Running `n` ticks in one call and in any sequence of
 //!   batches totalling `n` — serialising the state to JSON and back between
 //!   each — produces the same final hash and the same metric series
@@ -300,7 +309,8 @@ pub fn run_batch(
 /// non-finite `dt`; any negative or non-finite radius, speed or force cap; a
 /// non-finite weight; an `agent_count` of zero; a `separation_radius` wider
 /// than `neighbor_radius`; an obstacle with a non-positive or non-finite
-/// radius or a non-finite centre; and a non-finite goal.
+/// radius, a non-finite centre, or a radius whose avoidance band overflows to
+/// infinity; and a non-finite goal.
 ///
 /// **Not** rejected, because each is a legitimate experiment rather than a
 /// mistake:
@@ -418,6 +428,22 @@ pub fn validate(params: &SimParams) -> Result<(), Vec<String>> {
             problems.push(format!(
                 "obstacle {i} is centred at {:?}, but must have a finite centre",
                 obstacle.center
+            ));
+        }
+        // A finite radius is not enough: the avoidance law works over a band
+        // several times the radius, and that product overflows to infinity
+        // above roughly 8.99e307. The kernel handles it (the obstacle simply
+        // stops pushing), but silently ignoring an obstacle a user asked for
+        // is exactly what this function exists to prevent. Asked of `forces`
+        // rather than recomputed here, so the two cannot disagree about which
+        // obstacles a run can use.
+        let influence = crate::forces::obstacle_influence_radius(obstacle.radius);
+        if obstacle.radius.is_finite() && obstacle.radius > 0.0 && !influence.is_finite() {
+            problems.push(format!(
+                "obstacle {i} has radius {}, which is finite but so large that \
+                 its avoidance band overflows to {influence} — no agent could \
+                 ever be outside it, so it describes no obstacle at all",
+                obstacle.radius
             ));
         }
     }
@@ -635,6 +661,205 @@ mod tests {
         assert_eq!(state.tick, back.tick, "the tick is part of the checkpoint");
     }
 
+    #[test]
+    fn the_kernel_uses_trigonometry_in_one_place_only() {
+        // Defends the reproducibility claim at the top of this module, in the
+        // same source-scanning style `tests/purity.rs` uses to police
+        // dependencies — a rule that is only written down is a rule that
+        // erodes.
+        //
+        // `sin`, `cos` and `atan2` are not correctly-rounded operations and
+        // are not required to agree between libm implementations, CPU
+        // architectures, or optimisation levels. A last-bit disagreement is
+        // invisible in a chart and fatal to a persisted `state_hash`, which is
+        // compared for exact equality and shown to users as proof that a run
+        // reproduced. So the whole hashed pipeline stays trig-free, and the
+        // one deliberate exception — `metrics::toroidal_centroid`, which is
+        // never hashed, never stored, and carries a warning saying why — is
+        // named here rather than merely tolerated.
+        // Names, with the call parenthesis appended at runtime — spelling the
+        // needles out in full would make this test its own first offender.
+        const TRIG: [&str; 8] = [
+            "sin", "cos", "tan", "atan2", "asin", "acos", "atan", "sin_cos",
+        ];
+        const EXEMPT: &str = "metrics.rs";
+
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&src)
+            .expect("read src/")
+            .map(|e| e.expect("dir entry").path())
+            .filter(|p| p.extension().is_some_and(|e| e == "rs"))
+            .collect();
+        // Sorted: directory order is not deterministic, and a failure message
+        // that reorders itself between runs is a failure message nobody reads.
+        files.sort();
+        assert!(files.len() >= 8, "found only {} kernel sources", files.len());
+
+        let mut offenders = Vec::new();
+        let mut exempt_hits = 0usize;
+        for path in &files {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .expect("utf-8 file name")
+                .to_string();
+            let text = std::fs::read_to_string(path).expect("read source");
+            for (n, line) in text.lines().enumerate() {
+                let code = line.trim_start();
+                // Doc comments and module docs discuss trigonometry at length.
+                if code.starts_with("//") {
+                    continue;
+                }
+                if TRIG.iter().any(|t| code.contains(&format!("{t}("))) {
+                    if name == EXEMPT {
+                        exempt_hits += 1;
+                    } else {
+                        offenders.push(format!("{name}:{}: {code}", n + 1));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "trigonometry on the reproducible path — a persisted state hash \
+             can now differ between two machines running the same code:\n{}",
+            offenders.join("\n")
+        );
+        // Self-check: if the scanner stopped matching anything it would pass
+        // silently for ever. `metrics::circular_mean_axis` must keep showing up.
+        assert!(
+            exempt_hits > 0,
+            "the scanner found no trigonometry at all, not even the known \
+             occurrences in {EXEMPT}; it has stopped working"
+        );
+    }
+
+    // ------------------------------------------------ end-to-end golden hashes
+
+    /// Ticks every golden hash below is taken after. Long enough that a
+    /// single perturbed bit in the first tick has compounded through the whole
+    /// flock, so the pins are sensitive rather than decorative.
+    const GOLDEN_TICKS: u32 = 250;
+
+    /// `(name, params, seed, expected final state hash)`.
+    ///
+    /// # These constants are persisted provenance
+    ///
+    /// **Changing any value here invalidates every stored `state_hash`.**
+    /// `runs.final_state_hash` and `frames.state_hash` are written from
+    /// exactly this pipeline, shown to users, and AC-38 promises that
+    /// re-running from provenance reproduces the value. So a golden that no
+    /// longer matches is not a test to be re-baselined: it means the
+    /// arithmetic of the kernel changed, and every run recorded before the
+    /// change is now unreproducible. Updating a constant here must be a
+    /// deliberate, reviewed decision with the stored data migrated or
+    /// invalidated — the same treatment `hash::hash_is_pinned_to_a_known_value`
+    /// gives the hash function itself.
+    ///
+    /// # What these pin that nothing else does
+    ///
+    /// `hash.rs`'s golden pins the *hash function* over a hand-built flock;
+    /// `tests/cross_process.rs` runs the *same code* in two processes and so
+    /// cannot see a deliberate arithmetic change. Only these constants pin the
+    /// composition — seeding, neighbour queries, force blending, integration —
+    /// end to end. Two changes the rest of the suite accepts and these catch:
+    /// reordering the five terms of [`blend`] (which `forces.rs` documents as
+    /// part of the contract), and swapping the semi-implicit Euler in [`step`]
+    /// for an explicit one.
+    fn golden_runs() -> [(&'static str, SimParams, u64, u64); 5] {
+        [
+            // The shipped defaults: the scenario the example binary and the
+            // cross-process test both use, so these two are directly
+            // comparable with a hash produced by any other tool in the repo.
+            ("default/seed 0", SimParams::default(), 0, 0x18ae_2e5d_e42a_28e0),
+            ("default/seed 1", SimParams::default(), 1, 0xf8c6_9f07_14bb_7c6e),
+            // All five behaviours active with obstacles and a goal, so the
+            // full summation order of `blend` is exercised.
+            (
+                "interacting",
+                interacting(),
+                0x000D_0B1E,
+                0x4e7e_d35c_666f_64a0,
+            ),
+            // Saturated clamps, coincident agents, agents inside obstacles.
+            (
+                "adversarial",
+                adversarial(),
+                0x0BAD_1DEA,
+                0xae13_5289_3fb2_f48e,
+            ),
+            // Laps the world, so the position wrap is part of what is pinned.
+            (
+                "cruising",
+                cruising(),
+                0x0BAD_1DEA,
+                0x7f10_1eb8_26ad_c0bd,
+            ),
+        ]
+    }
+
+    #[test]
+    fn end_to_end_run_hashes_are_pinned_to_known_values() {
+        // The fingerprint of the whole pipeline, not of one function. See
+        // `golden_runs` for why re-baselining these is a data migration and
+        // not a test fix.
+        for (name, params, seed, expected) in golden_runs() {
+            let start = SimState::seeded(&params, seed);
+            let (end, _) = run_batch(&start, &params, GOLDEN_TICKS, 0);
+            assert_eq!(
+                end.state_hash(),
+                expected,
+                "{name}: run_batch({GOLDEN_TICKS} ticks, seed {seed}) hashed as \
+                 {} but the pinned value is {expected:#018x}. Every stored \
+                 provenance hash produced by this kernel is now unreproducible; \
+                 this is an arithmetic change, not a stale constant",
+                end.state_hash_hex(),
+            );
+        }
+    }
+
+    #[test]
+    fn the_pinned_runs_are_distinct_from_one_another() {
+        // Coverage guard for the golden above: five scenarios that all
+        // collapsed onto one state — an empty flock, say — would agree
+        // trivially and pin nothing.
+        let mut hashes: Vec<(String, u64)> = golden_runs()
+            .into_iter()
+            .map(|(name, _, _, expected)| (name.to_string(), expected))
+            .collect();
+        let count = hashes.len();
+        hashes.sort_by_key(|h| h.1);
+        hashes.dedup_by_key(|h| h.1);
+        assert_eq!(hashes.len(), count, "two golden runs share a hash");
+    }
+
+    #[test]
+    fn the_pinned_runs_are_reached_by_batching_too() {
+        // The goldens are taken from one `run_batch` call, but the product
+        // reaches them by resuming across checkpoints. Pin that the two
+        // routes land on the same value, so a golden cannot be satisfied by
+        // an unbatchable path.
+        for (name, params, seed, expected) in golden_runs() {
+            let mut current = SimState::seeded(&params, seed);
+            let mut done = 0;
+            while done < GOLDEN_TICKS {
+                let take = 37.min(GOLDEN_TICKS - done);
+                let (next, _) = run_batch(&current, &params, take, 0);
+                let json = serde_json::to_string(&next).expect("checkpoint write");
+                current = serde_json::from_str(&json).expect("checkpoint read");
+                done += take;
+            }
+            assert_eq!(current.tick, GOLDEN_TICKS);
+            assert_eq!(
+                current.state_hash(),
+                expected,
+                "{name}: checkpointed batches reached {} not the pinned value",
+                current.state_hash_hex()
+            );
+        }
+    }
+
     // ---------------------------------------------------------------- AC-18
 
     /// Fisher-Yates over the agent array using the kernel's own RNG, so the
@@ -707,6 +932,26 @@ mod tests {
         }
     }
 
+    /// The scenarios the generic AC-18 permutation tests are checked against.
+    ///
+    /// `interacting` is dense and smooth; `adversarial` adds saturated speed
+    /// and force clamps, agents inside obstacles, and a separation radius
+    /// nearly as wide as the neighbourhood, so a permutation-sensitive defect
+    /// in any of those paths shows up here rather than only in a scenario
+    /// chosen to be well-behaved.
+    ///
+    /// **Neither reaches the *exactly*-coincident tie-break.** `adversarial`
+    /// crowds agents to within `collision_radius`, which is not the same as
+    /// putting two of them on the same `f64` point, and `escape_direction`
+    /// only fires when `1/distance` is not finite. That case has its own test:
+    /// `permuting_a_pile_of_coincident_agents_changes_nothing`.
+    fn order_independence_scenarios() -> [(&'static str, SimParams, u64); 2] {
+        [
+            ("interacting", interacting(), 0x000D_0B1E),
+            ("adversarial", adversarial(), 0x0BAD_1DEA),
+        ]
+    }
+
     #[test]
     fn stepping_is_independent_of_agent_array_order() {
         // AC-18, and the reason `step` returns a new state instead of mutating
@@ -715,34 +960,35 @@ mod tests {
         // the answer would depend on where in the array an agent happened to
         // sit. Permuting the array and un-permuting the result is the exact
         // experiment that detects it.
-        let params = interacting();
-        let state = SimState::seeded(&params, 0x000D_0B1E);
-        let reference = step(&state, &params);
-
         let ids = |s: &SimState| -> Vec<u32> { s.agents.iter().map(|a| a.id).collect() };
-        for seed in 0..16u64 {
-            let mixed = shuffled(&state, seed);
-            assert_ne!(
-                ids(&mixed),
-                ids(&state),
-                "seed {seed} produced the identity permutation; \
-                 the test would prove nothing"
-            );
-            let stepped = step(&mixed, &params);
+        for (name, params, seed) in order_independence_scenarios() {
+            let state = SimState::seeded(&params, seed);
+            let reference = step(&state, &params);
 
-            // Exact equality, no tolerance: the hash is the persisted
-            // reproducibility token.
-            assert_eq!(
-                stepped.state_hash(),
-                reference.state_hash(),
-                "permutation {seed} changed the state hash"
-            );
-            assert_eq!(stepped.tick, reference.tick);
-            assert_bit_identical(
-                &by_id(&stepped),
-                &by_id(&reference),
-                &format!("permutation seed {seed}"),
-            );
+            for shuffle in 0..16u64 {
+                let mixed = shuffled(&state, shuffle);
+                assert_ne!(
+                    ids(&mixed),
+                    ids(&state),
+                    "{name}: seed {shuffle} produced the identity permutation; \
+                     the test would prove nothing"
+                );
+                let stepped = step(&mixed, &params);
+
+                // Exact equality, no tolerance: the hash is the persisted
+                // reproducibility token.
+                assert_eq!(
+                    stepped.state_hash(),
+                    reference.state_hash(),
+                    "{name}: permutation {shuffle} changed the state hash"
+                );
+                assert_eq!(stepped.tick, reference.tick);
+                assert_bit_identical(
+                    &by_id(&stepped),
+                    &by_id(&reference),
+                    &format!("{name}: permutation seed {shuffle}"),
+                );
+            }
         }
     }
 
@@ -750,21 +996,79 @@ mod tests {
     fn order_independence_survives_a_long_run() {
         // One tick can hide a leak that only compounds. Run both orderings
         // for many ticks and require them to stay bit-identical throughout.
-        let params = interacting();
-        let mut plain = SimState::seeded(&params, 0x5A1AD);
-        let mut mixed = shuffled(&plain, 0xBEEF);
-        for tick in 1..=120u32 {
-            plain = step(&plain, &params);
-            mixed = step(&mixed, &params);
-            assert_eq!(plain.tick, tick);
-            assert_eq!(mixed.tick, tick);
+        for (name, params, seed) in order_independence_scenarios() {
+            let mut plain = SimState::seeded(&params, seed ^ 0x5A1AD);
+            let mut mixed = shuffled(&plain, 0xBEEF);
+            for tick in 1..=120u32 {
+                plain = step(&plain, &params);
+                mixed = step(&mixed, &params);
+                assert_eq!(plain.tick, tick);
+                assert_eq!(mixed.tick, tick);
+                assert_eq!(
+                    plain.state_hash(),
+                    mixed.state_hash(),
+                    "{name}: orderings diverged at tick {tick}"
+                );
+            }
+            assert_bit_identical(&by_id(&plain), &by_id(&mixed), &format!("{name}, 120 ticks"));
+        }
+    }
+
+    #[test]
+    fn permuting_a_pile_of_coincident_agents_changes_nothing() {
+        // AC-18 at the one place a dense-but-generic scenario cannot reach.
+        //
+        // `forces::escape_direction` hashes the **unordered pair of ids** so
+        // that a coincident pair separates the same way whatever slots the two
+        // agents happen to occupy, and takes its sign from which id sorts
+        // lower so the pair is pushed apart rather than shoved along together.
+        // Re-keying that on slot indices — the obvious simplification, since
+        // the slot is already in hand — leaves the whole suite green unless a
+        // permuted scenario contains agents at *exactly* the same point.
+        // Every agent here starts at exactly the same point.
+        let params = SimParams {
+            agent_count: 24,
+            ..adversarial()
+        };
+        let agents = (0..24u32)
+            .map(|id| Agent {
+                id,
+                pos: Vec2::new(20.0, 20.0),
+                vel: Vec2::ZERO,
+            })
+            .collect();
+        let pile = SimState { tick: 0, agents };
+
+        let (reference, _) = run_batch(&pile, &params, 5, 0);
+        assert!(
+            reference
+                .agents
+                .iter()
+                .any(|a| a.pos != Vec2::new(20.0, 20.0)),
+            "the pile never dispersed, so the coincident tie-break never fired \
+             and this test would prove nothing"
+        );
+
+        let ids = |s: &SimState| -> Vec<u32> { s.agents.iter().map(|a| a.id).collect() };
+        for shuffle in 0..8u64 {
+            let mixed = shuffled(&pile, shuffle);
+            assert_ne!(
+                ids(&mixed),
+                ids(&pile),
+                "shuffle {shuffle} produced the identity permutation"
+            );
+            let (stepped, _) = run_batch(&mixed, &params, 5, 0);
             assert_eq!(
-                plain.state_hash(),
-                mixed.state_hash(),
-                "orderings diverged at tick {tick}"
+                stepped.state_hash(),
+                reference.state_hash(),
+                "permutation {shuffle} of a coincident pile changed the state hash"
+            );
+            assert_bit_identical(
+                &by_id(&stepped),
+                &by_id(&reference),
+                &format!("coincident pile, permutation {shuffle}"),
             );
         }
-        assert_bit_identical(&by_id(&plain), &by_id(&mixed), "after 120 ticks");
     }
 
     #[test]
@@ -1201,6 +1505,23 @@ mod tests {
                     })
                     .count();
 
+                // How far an agent is *permitted* to travel in one tick. The
+                // stored-speed assertion below is not enough on its own: the
+                // classic clamp-order bug writes the clamped velocity onto the
+                // agent but integrates the position with the UNCLAMPED one, so
+                // every stored speed stays legal while the flock teleports.
+                // The damage is entirely positional, so it has to be measured
+                // positionally.
+                let limit = params.max_speed * params.dt;
+                for (now, was) in state.agents.iter().zip(&previous.agents) {
+                    let moved = params.world.distance(was.pos, now.pos);
+                    assert!(
+                        moved <= limit + 1e-9,
+                        "{name} tick {tick}: agent {} moved {moved} > max_speed*dt = {limit}",
+                        now.id
+                    );
+                }
+
                 let grid = SpatialHash::build(&state.agents, &params.world, params.neighbor_radius);
                 for (i, a) in state.agents.iter().enumerate() {
                     assert!(
@@ -1366,6 +1687,65 @@ mod tests {
         assert!(
             state.agents.iter().any(|a| a.pos != Vec2::new(20.0, 20.0)),
             "the pile never dispersed"
+        );
+    }
+
+    // ---------------------------------------------------------------- AC-14
+
+    #[test]
+    fn with_a_zero_goal_weight_the_goal_position_is_provably_irrelevant() {
+        // AC-14's second clause, which the rest of the suite only asserted for
+        // a *single* force evaluation (`goal_seek` returning ZERO for `None`).
+        // The claim is stronger than that and is about a whole run: with
+        // `w_goal = 0` the goal must be **unobservable**, not merely weak. So
+        // change nothing but the goal — including moving it right outside the
+        // world — and require the same state hash after several hundred ticks,
+        // by which point any leak would have compounded across the flock.
+        const TICKS: u32 = 400;
+        let params = |goal| SimParams {
+            w_goal: 0.0,
+            goal,
+            ..interacting()
+        };
+        let goals = [
+            None,
+            Some(Vec2::new(0.0, 0.0)),
+            Some(Vec2::new(119.75, 0.5)),
+            Some(Vec2::new(60.0, 60.0)),
+            // Far outside the world: `validate` accepts any finite goal.
+            Some(Vec2::new(-4_000.0, 7_500.0)),
+        ];
+
+        let reference = params(goals[0]);
+        assert_eq!(validate(&reference), Ok(()));
+        let start = SimState::seeded(&reference, 0x60A1_0000);
+        let expected = run_batch(&start, &reference, TICKS, 0).0.state_hash();
+
+        for goal in goals {
+            let p = params(goal);
+            assert_eq!(validate(&p), Ok(()), "{goal:?} was rejected");
+            let (end, _) = run_batch(&start, &p, TICKS, 0);
+            assert_eq!(
+                end.state_hash(),
+                expected,
+                "a goal at {goal:?} changed the run despite w_goal = 0"
+            );
+        }
+
+        // Non-vacuity: the same comparison with the weight switched on must
+        // FAIL to agree, or the test above would also pass against a
+        // goal-seeking behaviour that had been deleted outright.
+        let weighted = |goal| SimParams {
+            w_goal: 0.4,
+            goal,
+            ..interacting()
+        };
+        let a = run_batch(&start, &weighted(goals[1]), TICKS, 0).0.state_hash();
+        let b = run_batch(&start, &weighted(goals[3]), TICKS, 0).0.state_hash();
+        assert_ne!(
+            a, b,
+            "with w_goal = 0.4 the goal position must still matter; \
+             the zero-weight comparison above proves nothing otherwise"
         );
     }
 
@@ -1676,6 +2056,52 @@ mod tests {
         assert!(
             !found.iter().any(|p| p.contains("obstacle 0")),
             "the valid obstacle was reported: {found:#?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_an_obstacle_whose_avoidance_band_overflows() {
+        // The radius itself is finite, so every plain finiteness check passes
+        // it — but `radius * OBSTACLE_INFLUENCE` is `+inf`, and the kernel
+        // (correctly, by its totality rule) responds by ignoring the obstacle
+        // entirely. Silently dropping an obstacle a user configured is the
+        // kind of "your scenario does not say what you think it says" that
+        // `validate` exists to report.
+        let params = SimParams {
+            obstacles: vec![
+                Obstacle {
+                    center: Vec2::new(10.0, 10.0),
+                    radius: 5.0,
+                },
+                Obstacle {
+                    center: Vec2::new(20.0, 20.0),
+                    radius: 1e308,
+                },
+            ],
+            ..SimParams::default()
+        };
+        let found = problems(&params);
+        assert!(
+            found.iter().any(|p| p.contains("obstacle 1")),
+            "the overflowing obstacle was not named: {found:#?}"
+        );
+        assert!(
+            !found.iter().any(|p| p.contains("obstacle 0")),
+            "the usable obstacle was reported: {found:#?}"
+        );
+
+        // The largest radius whose band is still finite must be accepted:
+        // the rule is about the band overflowing, not about "big".
+        assert_eq!(
+            validate(&SimParams {
+                obstacles: vec![Obstacle {
+                    center: Vec2::ZERO,
+                    radius: 8.9e307,
+                }],
+                ..SimParams::default()
+            }),
+            Ok(()),
+            "an obstacle with a finite band must still be accepted"
         );
     }
 

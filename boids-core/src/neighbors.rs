@@ -930,14 +930,35 @@ mod tests {
     }
 
     #[test]
-    fn spatial_hash_built_for_a_different_agent_slice_stays_exact() {
-        // Guards the "rebuild every tick" contract: a stale grid must not
-        // index out of bounds or drop agents it never saw.
+    fn a_grid_built_for_a_different_length_slice_falls_back_to_an_exact_scan() {
+        // Guards the `agents.len() != self.agent_count` fallback in
+        // `neighbors`: a grid built for a *different* flock must not index out
+        // of bounds, and must not drop agents it never saw.
+        //
+        // The added agent sits in the MIDDLE of the flock, at (45,45) — inside
+        // the flock's [20, 72.5]^2 span, well within the 12.0 radius of
+        // several existing agents. That placement is the whole test. Put it
+        // out at (4,4) instead, where it has no neighbours and is nobody's
+        // neighbour, and the stale grid answers every query correctly by
+        // accident: deleting the length guard outright still passes.
         let world = w100();
         let built_for = interior_flock();
         let grid = SpatialHash::build(&built_for, &world, 12.0);
         let mut moved = interior_flock();
-        moved.push(at(99, 4.0, 4.0));
+        moved.push(at(99, 45.0, 45.0));
+
+        // The intruder has to matter, or the fallback is not load-bearing.
+        let intruder = moved.len() - 1;
+        assert!(
+            !neighbors_naive(&moved, &world, intruder, 12.0).is_empty(),
+            "the added agent has no neighbours; the test would prove nothing"
+        );
+        assert!(
+            (0..built_for.len()).any(|i| neighbors_naive(&moved, &world, i, 12.0)
+                .contains(&intruder)),
+            "no existing agent sees the added agent; the test would prove nothing"
+        );
+
         for i in 0..moved.len() {
             assert_eq!(
                 grid.neighbors(&moved, &world, i, 12.0),
@@ -945,5 +966,42 @@ mod tests {
                 "agent {i}"
             );
         }
+    }
+
+    #[test]
+    fn the_length_guard_does_not_detect_a_same_length_flock_that_moved() {
+        // The known limitation of the guard above, pinned so nobody mistakes
+        // it for more than it is: the check is on the agent **count**, not on
+        // the positions the grid was built from. A flock of the same size
+        // whose members have moved still takes the fast path, and the fast
+        // path reads buckets that describe where those agents *used to be*.
+        //
+        // Nothing stronger is possible at this seam without re-deriving every
+        // bucket, which is exactly the work `build` does. What actually covers
+        // this is the "rebuild every tick" contract in `sim::step`, which
+        // builds one grid per tick from that tick's positions and never
+        // carries one across a step.
+        let world = w100();
+        let built_for = interior_flock();
+        let grid = SpatialHash::build(&built_for, &world, 12.0);
+
+        // Same length, but every agent teleported to the far corner.
+        let moved: Vec<Agent> = built_for
+            .iter()
+            .map(|a| at(a.id, (a.pos.x + 45.0) % 100.0, (a.pos.y + 45.0) % 100.0))
+            .collect();
+        assert_eq!(moved.len(), built_for.len(), "the guard is length-only");
+
+        let disagreements = (0..moved.len())
+            .filter(|&i| {
+                grid.neighbors(&moved, &world, i, 12.0) != neighbors_naive(&moved, &world, i, 12.0)
+            })
+            .count();
+        assert!(
+            disagreements > 0,
+            "a stale grid over a moved same-length flock agreed with an exact \
+             scan everywhere; if that is now genuinely true the guard has been \
+             strengthened and this test should be replaced, not deleted"
+        );
     }
 }

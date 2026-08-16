@@ -58,10 +58,34 @@ impl World {
     /// on the torus, which may point across a seam.
     ///
     /// In a width-100 world, `displacement((1,0), (99,0))` is `(-2,0)` — two
-    /// units to the *left*, not 98 to the right. Each component is at most
-    /// half the corresponding world dimension.
+    /// units to the *left*, not 98 to the right.
     ///
-    /// Inputs need **not** be pre-wrapped; callers may pass raw positions.
+    /// # Inputs need not be pre-wrapped — within a stated range
+    ///
+    /// The reduction is `d - size * round(d / size)`, which handles a
+    /// difference of many world-widths in one step. Callers may therefore pass
+    /// raw positions and no call site has to remember to wrap first.
+    ///
+    /// **Each component is at most half the corresponding world dimension
+    /// while `|b - a|` is within roughly `1e10` widths of that axis.** That
+    /// covers every position the simulation produces by a wide margin:
+    /// [`World::wrap`] keeps agents inside `[0,size)`, so a pair of wrapped
+    /// positions differs by less than one width.
+    ///
+    /// Past that the guarantee **degrades rather than failing**: `d / size`
+    /// runs out of low bits, `size * round(...)` no longer cancels `d`
+    /// cleanly, and the result can exceed half the world by a growing factor —
+    /// around 1.03x at `1e13` widths and around 4x at `1e15`. It stays finite
+    /// and deterministic throughout, and wrapping either input restores the
+    /// exact bound. See
+    /// `displacement_of_absurdly_out_of_world_inputs_degrades_but_stays_total`.
+    ///
+    /// The only unwrapped values the kernel feeds in are
+    /// [`SimParams::goal`](crate::config::SimParams::goal) and
+    /// [`Obstacle::center`](crate::config::Obstacle::center), which
+    /// `sim::validate` checks for finiteness but deliberately not for
+    /// magnitude — a goal `1e15` world-widths away is a nonsensical scenario
+    /// that steers strangely, not an unsafe one.
     #[must_use]
     pub fn displacement(&self, a: Vec2, b: Vec2) -> Vec2 {
         Vec2::new(
@@ -349,6 +373,76 @@ mod tests {
                 "displacement {d:?} exceeds half of {w:?}"
             );
         }
+    }
+
+    #[test]
+    fn displacement_keeps_the_half_world_bound_out_to_a_documented_magnitude() {
+        // The test above samples one fixed shape. The bound is not a law of
+        // arithmetic though — it is a property of the reduction
+        // `d - size * (d / size).round()`, which only cancels cleanly while
+        // the quotient has bits to spare. Sweep world sizes across six orders
+        // of magnitude and separations across ten, and require the bound to
+        // hold exactly everywhere inside the documented range.
+        let mut r = Rng::seeded(0x1EAD_B0DE);
+        for _ in 0..50_000 {
+            let size = 10f64.powf(r.range(-3.0, 3.0));
+            let w = World::new(size, size);
+            let reach = size * 10f64.powf(r.range(0.0, 10.0));
+            let point = |r: &mut Rng| Vec2::new(r.range(-reach, reach), r.range(-reach, reach));
+            let (a, b) = (point(&mut r), point(&mut r));
+            let d = w.displacement(a, b);
+            let half = size / 2.0;
+            assert!(
+                d.x.abs() <= half * (1.0 + 1e-9) && d.y.abs() <= half * (1.0 + 1e-9),
+                "displacement {d:?} exceeds half of a {size:e} world \
+                 (a={a:?}, b={b:?}, reach {reach:e})"
+            );
+        }
+    }
+
+    #[test]
+    fn displacement_of_absurdly_out_of_world_inputs_degrades_but_stays_total() {
+        // The documented other side of the line, pinned so it is a known
+        // property rather than a surprise found in production. Far enough out,
+        // `d / size` has no low bits left, the reduction stops cancelling, and
+        // a component CAN exceed half the world.
+        //
+        // Two things must remain true even there, because they are what the
+        // kernel actually relies on: the result is finite (never `NaN`, never
+        // an infinity) and it is deterministic. And wrapping either input must
+        // restore the exact bound, which is why every position inside the
+        // simulation is wrapped.
+        let mut r = Rng::seeded(0x0FF_0FF_0FF);
+        let mut breaches = 0usize;
+        for _ in 0..20_000 {
+            let size = 10f64.powf(r.range(-3.0, 0.0));
+            let w = World::new(size, size);
+            // 1e13..1e16 world-widths out: past the documented range.
+            let reach = size * 10f64.powf(r.range(13.0, 16.0));
+            let point = |r: &mut Rng| Vec2::new(r.range(-reach, reach), r.range(-reach, reach));
+            let (a, b) = (point(&mut r), point(&mut r));
+
+            let d = w.displacement(a, b);
+            assert!(d.is_finite(), "went non-finite: a={a:?} b={b:?} -> {d:?}");
+            assert_eq!(d, w.displacement(a, b), "not deterministic: {a:?} {b:?}");
+
+            if d.x.abs() > size / 2.0 || d.y.abs() > size / 2.0 {
+                breaches += 1;
+            }
+
+            // Wrapping first is the fix, and it always works.
+            let wrapped = w.displacement(w.wrap(a), w.wrap(b));
+            assert!(
+                wrapped.x.abs() <= size / 2.0 + EPS && wrapped.y.abs() <= size / 2.0 + EPS,
+                "wrapping did not restore the bound: {wrapped:?} in a {size:e} world"
+            );
+        }
+        assert!(
+            breaches > 0,
+            "no sampled pair exceeded half the world, so the documented \
+             degradation is not real; if the reduction has been made exact for \
+             these magnitudes, update `displacement`'s doc and replace this test"
+        );
     }
 
     #[test]
