@@ -259,3 +259,129 @@ fn committed_fixture_satisfies_its_own_invariants() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------
+// Gaps found by mutation testing during review. Each test below exists because a
+// deliberate mutation of the source survived the suite as it stood.
+// ---------------------------------------------------------------------------------
+
+#[test]
+fn rejects_position_with_no_counts() {
+    let e = err("x | 4k3/8/8/8/8/8/8/4K3 w - - 0 1 | ");
+    assert!(
+        matches!(e, OracleError::NoCounts { .. }),
+        "expected NoCounts, got {e:?}"
+    );
+}
+
+#[test]
+fn rejects_count_token_without_a_colon() {
+    let e = err("x | 4k3/8/8/8/8/8/8/4K3 w - - 0 1 | 1-20v");
+    assert!(
+        matches!(e, OracleError::MalformedCountToken { .. }),
+        "expected MalformedCountToken, got {e:?}"
+    );
+}
+
+#[test]
+fn rejects_non_numeric_depth() {
+    let e = err("x | 4k3/8/8/8/8/8/8/4K3 w - - 0 1 | a:20v");
+    assert!(
+        matches!(e, OracleError::MalformedCountToken { .. }),
+        "expected MalformedCountToken, got {e:?}"
+    );
+}
+
+#[test]
+fn rejects_depths_that_do_not_start_at_zero_or_one() {
+    // Adjacent-pair contiguity cannot see a row dropped from the FRONT: 2,3,4 is as
+    // contiguous as 1,2,3. Dropping the first published row is exactly the transcription
+    // slip that would go unnoticed.
+    let e = err("x | 4k3/8/8/8/8/8/8/4K3 w - - 0 1 | 2:400v 3:8902v");
+    assert!(
+        matches!(e, OracleError::DepthGap { found: 2, .. }),
+        "expected DepthGap anchored at the front, got {e:?}"
+    );
+}
+
+#[test]
+fn rejects_non_numeric_move_counters() {
+    for bad in [
+        "x | 4k3/8/8/8/8/8/8/4K3 w - - x 1 | 1:20v",
+        "x | 4k3/8/8/8/8/8/8/4K3 w - - 0 y | 1:20v",
+    ] {
+        let e = err(bad);
+        assert!(
+            matches!(e, OracleError::MalformedFen { .. }),
+            "expected MalformedFen for {bad:?}, got {e:?}"
+        );
+    }
+}
+
+#[test]
+fn accepts_large_but_valid_move_counters() {
+    let text = "x | 4k3/8/8/8/8/8/8/4K3 w - - 100 9999 | 1:20v";
+    assert!(
+        parse(text).is_ok(),
+        "six-field FEN with large counters must parse"
+    );
+}
+
+#[test]
+fn rejects_id_outside_the_documented_grammar() {
+    // The fixture header documents `id  [a-z0-9-]+`. A documented grammar that nothing
+    // enforces is a comment, not a rule.
+    for bad in ["Startpos", "start pos", "start_pos", ""] {
+        let text = format!("{bad} | 4k3/8/8/8/8/8/8/4K3 w - - 0 1 | 1:20v");
+        let e = err(&text);
+        assert!(
+            matches!(
+                e,
+                OracleError::MalformedId { .. } | OracleError::MalformedLine { .. }
+            ),
+            "expected the id {bad:?} to be rejected, got {e:?}"
+        );
+    }
+}
+
+#[test]
+fn rejects_depth_that_does_not_fit_in_u32() {
+    let e = err("x | 4k3/8/8/8/8/8/8/4K3 w - - 0 1 | 4294967296:20v");
+    assert!(
+        matches!(e, OracleError::DepthOutOfRange { .. }),
+        "expected DepthOutOfRange, got {e:?}"
+    );
+}
+
+#[test]
+fn rejects_consecutive_digits_in_a_rank() {
+    // "1111K111" sums to 8 files but is not canonical FEN, and a rank-sum check alone
+    // waves it through.
+    let e = err("x | 4k3/8/8/8/8/8/8/1111K111 w - - 0 1 | 1:20v");
+    assert!(
+        matches!(e, OracleError::MalformedFen { .. }),
+        "expected MalformedFen, got {e:?}"
+    );
+}
+
+#[test]
+fn rejects_en_passant_square_contradicting_the_side_to_move() {
+    // After white pushes a pawn two squares the target is on rank 3 and it is black's
+    // turn. The reverse pairing is decidable without a board.
+    let e = err("x | 4k3/8/8/8/8/8/8/4K3 w - e3 0 1 | 1:20v");
+    assert!(
+        matches!(e, OracleError::MalformedFen { .. }),
+        "expected MalformedFen for w-to-move with a rank-3 target, got {e:?}"
+    );
+    let e = err("x | 4k3/8/8/8/8/8/8/4K3 b - e6 0 1 | 1:20v");
+    assert!(
+        matches!(e, OracleError::MalformedFen { .. }),
+        "expected MalformedFen for b-to-move with a rank-6 target, got {e:?}"
+    );
+}
+
+#[test]
+fn accepts_en_passant_square_consistent_with_the_side_to_move() {
+    assert!(parse("x | 4k3/8/8/8/8/8/8/4K3 b - e3 0 1 | 1:20v").is_ok());
+    assert!(parse("x | 4k3/8/8/8/8/8/8/4K3 w - e6 0 1 | 1:20v").is_ok());
+}

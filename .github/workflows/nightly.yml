@@ -21,14 +21,19 @@ jobs:
     timeout-minutes: 60
     env:
       BOIDBOARD_REQUIRE_STOCKFISH: "1"
-      # Replay every independently-verified count in the fixture, not just the cheap tier.
-      # ~12 billion nodes across the seven positions.
+      # Replay every independently-verified count in the fixture, not just the cheap tier:
+      # all 44 'v' rows rather than the 30 that fit the default budget. Roughly 23 billion
+      # nodes across the seven positions -- kiwipete d6 alone is 8.0e9 and takes ~57s.
       BOID_PERFT_MAX_NODES: "20000000000"
     steps:
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      # Toolchain BEFORE the cache action: rust-cache computes its key from `rustc -vV`,
+      # which is itself what triggers the rustup download for the pinned version. Ordered
+      # the other way round, the retry script sits downstream of the step that actually
+      # fails -- which is exactly how CI run 1 died ("Command failed: rustc -vV").
       - name: Install pinned toolchain
         run: ./scripts/setup-toolchain.sh
+      - uses: Swatinem/rust-cache@v2
       - run: ./scripts/setup-stockfish.sh
       - run: cargo test --workspace -- --nocapture
 
@@ -41,9 +46,13 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      # Toolchain BEFORE the cache action: rust-cache computes its key from `rustc -vV`,
+      # which is itself what triggers the rustup download for the pinned version. Ordered
+      # the other way round, the retry script sits downstream of the step that actually
+      # fails -- which is exactly how CI run 1 died ("Command failed: rustc -vV").
       - name: Install pinned toolchain
         run: ./scripts/setup-toolchain.sh
+      - uses: Swatinem/rust-cache@v2
       - name: Install libpq
         # autumn-web's default features reach diesel/postgres. Today pq-sys emits no link
         # directive so nothing needs libpq, but that is latent rather than absent, and one
@@ -66,5 +75,11 @@ jobs:
       # Deliberately no rust-cache: this job exists to prove a clean checkout builds.
       - name: Install pinned toolchain
         run: ./scripts/setup-toolchain.sh
+      - run: ./scripts/setup-stockfish.sh
       - run: cargo build --workspace --locked
-      - run: cargo test --workspace --locked
+      - name: cargo test --workspace --locked
+        # Without REQUIRE the differential tests would skip silently on a cold runner,
+        # which would make this job's green tick mean less than it appears to.
+        env:
+          BOIDBOARD_REQUIRE_STOCKFISH: "1"
+        run: cargo test --workspace --locked

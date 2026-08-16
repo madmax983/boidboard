@@ -6,7 +6,8 @@
 #
 # PROVENANCE
 #   requested-url:      https://www.chessprogramming.org/Perft_Results
-#   source-url:         https://chessprogramming.org/Perft_Results  (HTTP 308 from the above)
+#   source-url:         https://chessprogramming.org/Perft_Results  (HTTP 301 from the above
+#                       on GET; a HEAD request answers 308)
 #   fetched:            2026-08-16
 #   http-status:        200
 #   page-bytes:         33664
@@ -27,7 +28,11 @@
 #     depth  decimal, ascending, contiguous, no duplicates
 #     nodes  decimal digits only, no thousands separators, must fit in u64
 #     flag   v = independently re-derived with Stockfish 16 by this project, 2026-08-16
-#            p = published only; NOT corroborated here
+#            p = published only; NOT corroborated here. Either too deep to replay in
+#                reasonable time, or depth 0 -- which is 1 by definition and which
+#                `go perft 0` cannot report, since it falls through to a real search.
+#
+#   Totals: 55 counts, of which 44 are 'v' and 11 are 'p'.
 #
 # DEPTH BUDGET
 #   The differential harness replays every 'v' count whose value is <= the environment

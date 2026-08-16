@@ -53,9 +53,10 @@ Rule:         Do not read, copy, adapt, or cite any code from `archive/boids-sim
 
 Evidence:     Enforced mechanically by the `repo-invariants` CI job, which fails if
   `git merge-base --is-ancestor a1f70323c6d56629a18e959894f0815efa0d3ac9 HEAD` succeeds, or
-  if the blob-hash sets of `HEAD` and `archive/boids-sim-attempt` intersect anywhere other
-  than `LICENSE`. The archived tree is available to CI through the tag itself, so no
-  manifest of hashes needs to be committed.
+  if the blob-hash sets of `HEAD` and that commit intersect anywhere other than `LICENSE`.
+  Both checks key off the COMMIT SHA, not the tag, and the job fetches the commit if the
+  runner does not already have it. That is deliberate: the tag could not be pushed
+  (D-0016), so enforcement that depended on it would not run at all.
 
 Consequences: Phase 5 (#11) writes the boids force model from scratch against the discrete
   attack-set formulation, with no reference implementation to fall back on. That cost is
@@ -98,8 +99,9 @@ Rule:         No document in this repository may DEFINE or CERTIFY this project'
 Evidence:     The prior attempt (D-0001) committed `docs/AC_VERIFICATION.md` certifying
   "All 52 acceptance criteria are met", with 393 passing tests, for a boids simulator
   rather than a chess engine. Every criterion was met and the product was wrong.
-  Enforced by the `repo-invariants` CI job: any path matching `docs/**/accept*` or
-  `docs/**/criteria*` fails the build.
+  Enforced by the `repo-invariants` CI job: any TRACKED path whose basename begins with
+  `accept` or `criteria` fails the build. The check is repository-wide -- an earlier version
+  searched only `docs/`, which made the rule evadable by putting the document anywhere else.
 
 Consequences: Issue #3's own AC evidence table is delivered in the pull request body and as
   an issue comment. It is deliberately NOT committed to this repository -- committing it
@@ -356,6 +358,13 @@ Decision:     Edition 2024, `resolver = "3"`, MSRV `1.94`, and the toolchain pin
   `scripts/setup-toolchain.sh`, which retries with backoff and then fails loudly rather
   than letting the error surface inside an unrelated cargo command.
 
+  That step must run BEFORE `Swatinem/rust-cache`, not after. The cache action computes its
+  key from `rustc -vV`, and that invocation is itself what triggers the rustup download for
+  the pinned version — so ordered the other way round the retry sits downstream of the step
+  that actually fails. This is not a hypothetical: run 1's error was literally
+  `Command failed: rustc -vV`, raised inside the rust-cache step, and the first version of
+  this mitigation was placed after it and would not have helped.
+
 Rule:         Do not introduce `unsafe` outside `boid-board`, and do not introduce it there
   without a module-scoped allow and a `// SAFETY:` comment on every block. Every CI job
   that runs cargo must first run `scripts/setup-toolchain.sh`.
@@ -518,6 +527,15 @@ Decision:     The following are deliberately deferred:
     an option for issue #6.
   - **`include_str!` reaching outside the crate directory** breaks `cargo package --verify`
     for `boid-board`. Accepted: nothing here publishes to crates.io.
+  - **`validate_fen` returns `Result<(), String>`.** An unmatchable error, immediately
+    re-stringified into `OracleError::MalformedFen`. Correct for a fixture validator, wrong
+    for the FEN reader issue #4 will build on it: a caller that wants to branch on *why* a
+    FEN was rejected cannot. Deferred to #4, which should introduce a typed `FenError` and
+    have this function return it.
+  - **`PerftEngine` has no `divide`.** Perft divide -- the per-root-move breakdown -- is the
+    only practical way to localise a mismatch, and issue #6 names it explicitly. Deliberately
+    not guessed at now: its return shape depends on how #4 represents a move, and inventing
+    that before `Move` exists would cost a rewrite. #6 adds it to the trait.
 
 Rule:         Revisit each deferral in the issue named against it; do not let a deferral
   become an unexamined default.
@@ -564,3 +582,103 @@ Evidence:     `dpkg -L stockfish` lists only `/usr/games/stockfish`. After the s
 
 Consequences: AC5 is reproducible rather than a one-shot manual step in a container that no
   longer exists.
+
+---
+
+## D-0016 — Corrections found by the post-merge review, and the AC4 tag blocker
+
+Status:       Accepted
+Date:         2026-08-16
+
+Context:      After issue #3's pull request was merged, a six-angle code review with
+  adversarial verification was run against it. It found real defects, including several in
+  this project's own claims about itself. An error in a decision log is worse than an error
+  in code, because the log is what later phases trust without re-checking.
+
+Decision:     The corrections are recorded here rather than by editing history.
+
+  **Miscounted oracle totals.** The pull request said the fixture held "51 node counts", of
+  which "44" were verified and "7" published-only. The true totals are **55 counts, 44
+  verified, 11 published-only**. The verified figure was right; the total was understated,
+  which flattered the verified fraction (80%, not 86%). The three numbers are now asserted
+  by `oracle_transcription::fixture_provenance_totals_are_what_the_project_claims`, so they
+  cannot drift again unnoticed.
+
+  **Mis-glossed provenance flag.** The `p` flag was described as "too deep to replay". Two
+  of the eleven `p` counts are `perft(0) = 1`, which is not too deep -- it is 1 by
+  definition, and `go perft 0` cannot report it because it falls through to a real search.
+  Corrected in the fixture header and `README.md`.
+
+  **Wrong redirect code.** The fixture header recorded the source URL redirect as HTTP 308.
+  A GET returns **301**; 308 is what a HEAD request answers. Corrected.
+
+  **Wrong CI-run attribution.** The pull request attributed the transient toolchain-download
+  failure to CI run 2. It happened in run **1** (`8f93a43`), which failed on both the
+  toolchain download and the dependency-DAG diff; run 2 (`7fabd23`) failed on the DAG diff
+  alone.
+
+  **Two accessors weakened the tests they were meant to serve.** The refactor that
+  introduced `PerftCase::fen_fields()` and `verified_counts()` routed every call site
+  through them, and mutation testing showed both could be sabotaged with the whole suite
+  still green: `fen_fields()` could `return 4`, and `verified_counts()` could drop its
+  provenance filter. An accessor that every assertion trusts is a single point at which all
+  of them can be made to lie. Both mutations are now caught.
+
+  **A miscount in a commit message.** `111a360` says the second transcription holds "39
+  canonical counts typed by hand". It holds **37**. The commit is merged and its message is
+  immutable, so the correction lives here.
+
+  **A blind spot the budget creates.** `cargo test --workspace` replays only the 30 verified
+  rows under the default 5,000,000-node ceiling, so a corrupted verified count *deeper* than
+  the budget is invisible locally. It is not invisible in CI: the nightly `deep-perft` job
+  raises the ceiling and replays all 44. The differential harness's module doc now says so
+  rather than leaving the reader to infer coverage it does not have.
+
+Rule:         A numeric claim about this project, made anywhere -- commit message, README,
+  decision log, pull request -- must be asserted by a test if it is asserted at all.
+  Introducing an accessor that existing assertions route through requires a test pinning
+  the accessor itself against a direct computation.
+
+Evidence:     `cargo test --workspace`; the mutations above now fail
+  `fen_fields_accessor_agrees_with_the_raw_fen`,
+  `verified_counts_excludes_published_only_rows`, and
+  `fixture_provenance_totals_are_what_the_project_claims`.
+
+Consequences: The fixture's SHA-256 changed when its header was corrected, so
+  `ORACLE_SHA256` moved with it -- which is the pinning mechanism working as designed
+  rather than a weakening of it.
+
+---
+
+## D-0017 — AC4's tag could not be pushed by the authoring session
+
+Status:       Accepted
+Date:         2026-08-16
+
+Context:      Issue #3 AC4 requires `archive/boids-sim-attempt` to point at
+  `a1f70323c6d56629a18e959894f0815efa0d3ac9` **and be pushed to origin**.
+
+Decision:     The annotated tag was created locally at the correct commit. It could not be
+  pushed. `git push origin archive/boids-sim-attempt` returned HTTP 403 on four attempts,
+  while branch pushes from the same session succeeded and the egress proxy recorded no
+  relay failures -- so the refusal is GitHub-side and the session credential is scoped to
+  `refs/heads/*`. No GitHub API tool available to the session creates tag refs either.
+
+  This is reported as an unmet criterion rather than worked around. A lightweight tag, a
+  branch named like a tag, or a local-only tag would each have produced a green tick for
+  something the criterion does not ask for.
+
+Rule:         AC4 remains open until `git ls-remote --tags origin` lists
+  `refs/tags/archive/boids-sim-attempt`. Do not substitute another ref type for it.
+
+Evidence:     `git ls-remote --tags origin` returns nothing. Locally,
+  `git cat-file -t archive/boids-sim-attempt` is `tag` and
+  `git rev-parse archive/boids-sim-attempt^{commit}` is the required SHA.
+  A maintainer completes it with:
+      git tag -a archive/boids-sim-attempt a1f70323c6d56629a18e959894f0815efa0d3ac9 \
+        -m 'Quarantine: prior attempt, PR #2 (closed unmerged).'
+      git push origin archive/boids-sim-attempt
+
+Consequences: The `repo-invariants` job enforces the tag's target the moment it exists and
+  warns until then. Quarantine enforcement (D-0001) is unaffected: it keys off the commit
+  SHA, so it is live today.

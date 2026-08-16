@@ -27,7 +27,13 @@ if [ -n "$rust_files" ]; then
   if hits=$(printf '%s\n' "$rust_files" | xargs grep -nE 'assert!\(\s*true\s*\)' 2>/dev/null); then
     report "assertion that cannot fail" "$hits"
   fi
-  if hits=$(printf '%s\n' "$rust_files" | xargs grep -nE '#\[ignore' 2>/dev/null); then
+  # assert_eq!(x, x) — the comment above claimed this was caught; now it is.
+  if hits=$(printf '%s\n' "$rust_files" \
+      | xargs grep -nE 'assert_eq!\(\s*([A-Za-z_][A-Za-z0-9_.]*)\s*,\s*\1\s*[,)]' 2>/dev/null); then
+    report "assertion comparing a value with itself" "$hits"
+  fi
+  # cfg_attr(..., ignore) removes a test from the run without the literal #[ignore].
+  if hits=$(printf '%s\n' "$rust_files" | xargs grep -nE '#\[ignore|cfg_attr\(.*ignore' 2>/dev/null); then
     report "ignored test (this project runs every test it ships)" "$hits"
   fi
   if hits=$(printf '%s\n' "$rust_files" | xargs grep -nE '#!\[allow\(' 2>/dev/null); then
