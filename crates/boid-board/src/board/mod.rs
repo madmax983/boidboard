@@ -31,6 +31,8 @@
 //! there is no undo stack, so repetition and fifty-move detection need a history threaded
 //! through the search stack, which is issue #8's to own (D-0027).
 
+pub mod edit;
+
 use core::fmt;
 
 use crate::bitboard::Bitboard;
@@ -506,5 +508,110 @@ impl fmt::Debug for Board {
             self.key,
             self.pawn_key
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The assertions that need private fields, and that everything else depends on.
+    //!
+    //! Every piece of evidence for AC5 routes through `key()` and `recomputed_key()`. If
+    //! either of those two functions could lie — if `recomputed_key` returned `self.key`,
+    //! or if `key()` recomputed instead of reading — then the transposition tests, the
+    //! pinned position literals, the table digest and the two-process check would all still
+    //! pass, and the incremental maintenance they are supposed to be evidence for would be
+    //! dead code. D-0016 records that failure mode from issue #3's review: "an accessor
+    //! that every assertion trusts is a single point at which all of them can be made to
+    //! lie."
+    //!
+    //! Corrupting a private field is the only way to ask the question, so these live here
+    //! rather than in `crates/boid-board/tests/`.
+
+    use super::Board;
+    use crate::types::{Colour, PieceKind, Square};
+
+    #[test]
+    fn recomputed_key_does_not_read_the_stored_key() {
+        let mut board = Board::startpos();
+        board.key ^= 1;
+        assert_ne!(
+            board.key,
+            board.recomputed_key(),
+            "recomputed_key() must walk the position, not return the stored key"
+        );
+        assert_eq!(
+            board.recomputed_key(),
+            Board::startpos().key(),
+            "and the walk must still produce the position's real key"
+        );
+    }
+
+    #[test]
+    fn key_accessor_reads_the_stored_field() {
+        // The mirror of the test above. If `key()` recomputed, the incremental maintenance
+        // in `edit.rs` would never be observed by anything and could be deleted wholesale
+        // with the suite still green.
+        let mut board = Board::startpos();
+        board.key ^= 1;
+        assert_ne!(board.key(), board.recomputed_key());
+        assert_eq!(board.key(), Board::startpos().key() ^ 1);
+    }
+
+    #[test]
+    fn recomputed_pawn_key_does_not_read_the_stored_field() {
+        let mut board = Board::startpos();
+        board.pawn_key ^= 1;
+        assert_ne!(board.pawn_key, board.recomputed_pawn_key());
+        assert_eq!(board.recomputed_pawn_key(), Board::startpos().pawn_key());
+    }
+
+    #[test]
+    fn consistency_detects_a_corrupt_piece_bitboard() {
+        let mut board = Board::startpos();
+        board.pieces[PieceKind::Knight.index()] =
+            board.pieces[PieceKind::Knight.index()].with(Square::E4);
+        let error = board.consistency().expect_err("a phantom knight on e4");
+        assert!(
+            matches!(
+                error,
+                super::Inconsistency::ColourUnionIsNotOccupancy { square }
+                    | super::Inconsistency::MailboxDisagreesWithBitboards { square, .. }
+                    if square == Square::E4
+            ),
+            "expected the invariant to name e4, got {error}"
+        );
+    }
+
+    #[test]
+    fn consistency_detects_a_corrupt_colour_bitboard() {
+        let mut board = Board::startpos();
+        board.colours[Colour::White.index()] =
+            board.colours[Colour::White.index()].with(Square::E4);
+        let error = board.consistency().expect_err("a colour with no piece");
+        assert!(
+            matches!(
+                error,
+                super::Inconsistency::ColourUnionIsNotOccupancy { square } if square == Square::E4
+            ),
+            "expected ColourUnionIsNotOccupancy on e4, got {error}"
+        );
+    }
+
+    #[test]
+    fn consistency_detects_a_corrupt_mailbox_entry() {
+        let mut board = Board::startpos();
+        board.mailbox[Square::E2.index() as usize] = None;
+        let error = board.consistency().expect_err("a pawn the mailbox forgot");
+        assert!(
+            matches!(
+                error,
+                super::Inconsistency::MailboxDisagreesWithBitboards {
+                    square,
+                    mailbox: None,
+                    ..
+                } if square == Square::E2
+            ),
+            "expected MailboxDisagreesWithBitboards on e2, got {error}"
+        );
     }
 }
