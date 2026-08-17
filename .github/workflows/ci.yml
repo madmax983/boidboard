@@ -211,8 +211,76 @@ jobs:
           grep -A1 'name = "autumn-harvest"' Cargo.lock | grep -q 'version = "0.5.'
           echo "Cargo.lock is tracked and pins autumn-web 0.6.x / autumn-harvest 0.5.x"
 
+      - name: Zobrist table matches its independent Python derivation (D-0025)
+        run: |
+          set -euo pipefail
+          # scripts/zobrist-reference.py was written from docs/DECISIONS.md D-0019/D-0025,
+          # not from src/zobrist.rs, and its digest was computed BEFORE the Rust constant
+          # was pinned. This step keeps the two derivations tied together.
+          command -v python3 >/dev/null || { echo "python3 is required"; exit 1; }
+          derived=$(./scripts/zobrist-reference.py)
+          pinned=$(grep -oE '"[0-9a-f]{64}"' crates/boid-board/tests/zobrist_digest.rs \
+                   | head -1 | tr -d '"')
+          # An empty pinned value would make the comparison vacuously pass on a rename.
+          [ -n "$pinned" ] || { echo "no pinned digest found in zobrist_digest.rs"; exit 1; }
+          echo "python: $derived"
+          echo "pinned: $pinned"
+          [ "$derived" = "$pinned" ]
+
+      - name: No attack tables or move generation until issue #5 (D-0024)
+        run: |
+          set -euo pipefail
+          # The #4/#5 seam, mechanically. Move APPLICATION needs no attack tables; move
+          # GENERATION and LEGALITY need nothing else. If a function matching these names
+          # appears before issue #5, the seam has moved and the decision log is stale.
+          if git grep -nE 'fn +(attackers_to|is_square_attacked|is_check|generate_[a-z_]*moves)' \
+               -- 'crates/*/src/*'; then
+            echo "D-0024 violated: attack or generation code landed before issue #5."
+            exit 1
+          fi
+          echo "no attack tables or move generation present"
+
+      - name: No unmake_move in the public API (issue #4 AC7)
+        run: |
+          set -euo pipefail
+          # Scoped to src/ deliberately. tests/board_layout.rs DEFINES these names in a
+          # blanket trait so that an inherent method would shadow them -- that test is how
+          # AC7 is proved, not a violation of it.
+          if git grep -nE 'fn +(unmake|unapply|undo|take_back)_?move' -- 'crates/*/src/*'; then
+            echo "AC7 violated: Board is Copy and must have no undo entry point."
+            exit 1
+          fi
+          echo "no unmake_move present"
+
+      - name: Every test the decision log cites resolves to a test that exists (D-0029)
+        run: |
+          set -euo pipefail
+          # Four Evidence citations in docs/DECISIONS.md named tests that did not exist --
+          # they had been renamed and the log was not. A citation nobody resolves is worse
+          # than no citation, because a reader trusts it.
+          missing=0
+          # Only file::test_name shapes, where the file half matches a real test file.
+          refs=$(grep -oE '\b[a-z_][a-z0-9_]*::[a-z_][a-z0-9_]*\b' docs/DECISIONS.md | sort -u)
+          for ref in $refs; do
+            file="${ref%%::*}"
+            name="${ref##*::}"
+            [ -f "crates/boid-board/tests/${file}.rs" ] || continue
+            if ! grep -rq "fn ${name}\b" "crates/boid-board/tests/${file}.rs"; then
+              echo "UNRESOLVED: docs/DECISIONS.md cites ${ref}, which does not exist"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          echo "every cited test resolves"
+
       - name: Anti-theatre scan
-        run: ./scripts/anti-theatre.sh
+        run: |
+          set -euo pipefail
+          # Prove the scanner can fail before trusting it to say the tree is clean. A
+          # scanner nobody has seen fire is indistinguishable from one that matches
+          # nothing -- and the self-test caught a real hole in this very script.
+          ./scripts/anti-theatre.sh --selftest
+          ./scripts/anti-theatre.sh
 
       - name: Quarantine — no archived code may re-enter the tree (D-0001)
         run: |

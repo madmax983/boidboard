@@ -6,13 +6,28 @@
 //! that is lenient about its oracle is worse than no oracle: it converts a loud failure
 //! into a quiet wrong answer.
 
+use boid_board::fen::{FenError, FenField};
 use boid_board::perft::oracle::{ORACLE_TEXT, OracleError, parse};
+use boid_board::{Color, Square};
 
 /// A structurally valid line, used as the baseline that negative cases mutate.
 const VALID: &str = "x | 4k3/8/8/8/8/8/8/4K3 w - - 0 1 | 1:20v 2:400v";
 
 fn err(text: &str) -> OracleError {
     parse(text).expect_err("expected this fixture to be rejected")
+}
+
+/// The typed cause behind a [`OracleError::MalformedFen`].
+///
+/// Exists so that every FEN rejection below can name the rule it broke. Before issue #4
+/// these assertions all matched `MalformedFen { .. }`, and a probe proved what that was
+/// worth: collapsing every `FenError` variant to a single value broke **none** of them.
+/// D-0023 requires each to name its cause.
+fn fen_cause(e: &OracleError) -> FenError {
+    match e {
+        OracleError::MalformedFen { source, .. } => *source,
+        other => panic!("expected MalformedFen, got {other:?}"),
+    }
 }
 
 // ---------------------------------------------------------------------------------
@@ -130,83 +145,77 @@ fn rejects_rank_not_summing_to_eight() {
     // "4K4" is nine files. This is the single most likely way a hand-edited FEN goes
     // wrong, and it produces a FEN that still looks plausible.
     let e = err("x | 4k3/8/8/8/8/8/8/4K4 w - - 0 1 | 1:20v");
-    assert!(
-        matches!(e, OracleError::MalformedFen { .. }),
-        "expected MalformedFen, got {e:?}"
+    assert_eq!(
+        fen_cause(&e),
+        FenError::WrongFileCount { rank: 1, found: 9 }
     );
 }
 
 #[test]
 fn rejects_wrong_rank_count() {
     let e = err("x | 4k3/8/8/8/8/8/4K3 w - - 0 1 | 1:20v");
-    assert!(
-        matches!(e, OracleError::MalformedFen { .. }),
-        "expected MalformedFen, got {e:?}"
-    );
+    assert_eq!(fen_cause(&e), FenError::WrongRankCount { found: 7 });
 }
 
 #[test]
 fn rejects_missing_king() {
     let e = err("x | 8/8/8/8/8/8/8/4K3 w - - 0 1 | 1:20v");
-    assert!(
-        matches!(e, OracleError::MalformedFen { .. }),
-        "expected MalformedFen for a position with no black king, got {e:?}"
+    assert_eq!(
+        fen_cause(&e),
+        FenError::WrongKingCount {
+            color: Color::Black,
+            found: 0
+        }
     );
 }
 
 #[test]
 fn rejects_two_kings_of_one_colour() {
     let e = err("x | 4k3/8/8/8/8/8/8/3KK3 w - - 0 1 | 1:20v");
-    assert!(
-        matches!(e, OracleError::MalformedFen { .. }),
-        "expected MalformedFen for two white kings, got {e:?}"
+    assert_eq!(
+        fen_cause(&e),
+        FenError::WrongKingCount {
+            color: Color::White,
+            found: 2
+        }
     );
 }
 
 #[test]
 fn rejects_invalid_piece_character() {
     let e = err("x | 4k3/8/8/8/8/8/8/4K2X w - - 0 1 | 1:20v");
-    assert!(
-        matches!(e, OracleError::MalformedFen { .. }),
-        "expected MalformedFen, got {e:?}"
+    assert_eq!(
+        fen_cause(&e),
+        FenError::BadPieceChar {
+            found: 'X',
+            rank: 1
+        }
     );
 }
 
 #[test]
 fn rejects_bad_side_to_move() {
     let e = err("x | 4k3/8/8/8/8/8/8/4K3 x - - 0 1 | 1:20v");
-    assert!(
-        matches!(e, OracleError::MalformedFen { .. }),
-        "expected MalformedFen, got {e:?}"
-    );
+    assert_eq!(fen_cause(&e), FenError::BadSideToMove);
 }
 
 #[test]
 fn rejects_castling_field_outside_kqkq() {
     let e = err("x | 4k3/8/8/8/8/8/8/4K3 w KQkqX - 0 1 | 1:20v");
-    assert!(
-        matches!(e, OracleError::MalformedFen { .. }),
-        "expected MalformedFen, got {e:?}"
-    );
+    assert_eq!(fen_cause(&e), FenError::BadCastlingChar { found: 'X' });
 }
 
 #[test]
 fn rejects_bad_en_passant_square() {
     let e = err("x | 4k3/8/8/8/8/8/8/4K3 w - e9 0 1 | 1:20v");
-    assert!(
-        matches!(e, OracleError::MalformedFen { .. }),
-        "expected MalformedFen, got {e:?}"
-    );
+    assert_eq!(fen_cause(&e), FenError::BadEnPassantSquare);
 }
 
 #[test]
 fn rejects_fen_with_five_fields() {
     // Four fields (as published for Kiwipete) or six. Five means a field was dropped.
     let e = err("x | 4k3/8/8/8/8/8/8/4K3 w - - 0 | 1:20v");
-    assert!(
-        matches!(e, OracleError::MalformedFen { .. }),
-        "expected MalformedFen, got {e:?}"
-    );
+    assert_eq!(fen_cause(&e), FenError::WrongFieldCount { found: 5 });
 }
 
 #[test]
@@ -306,14 +315,21 @@ fn rejects_depths_that_do_not_start_at_zero_or_one() {
 
 #[test]
 fn rejects_non_numeric_move_counters() {
-    for bad in [
-        "x | 4k3/8/8/8/8/8/8/4K3 w - - x 1 | 1:20v",
-        "x | 4k3/8/8/8/8/8/8/4K3 w - - 0 y | 1:20v",
+    for (bad, expected) in [
+        (
+            "x | 4k3/8/8/8/8/8/8/4K3 w - - x 1 | 1:20v",
+            FenField::HalfmoveClock,
+        ),
+        (
+            "x | 4k3/8/8/8/8/8/8/4K3 w - - 0 y | 1:20v",
+            FenField::FullmoveNumber,
+        ),
     ] {
         let e = err(bad);
-        assert!(
-            matches!(e, OracleError::MalformedFen { .. }),
-            "expected MalformedFen for {bad:?}, got {e:?}"
+        assert_eq!(
+            fen_cause(&e),
+            FenError::BadNumber { field: expected },
+            "for {bad:?}"
         );
     }
 }
@@ -358,30 +374,38 @@ fn rejects_consecutive_digits_in_a_rank() {
     // "1111K111" sums to 8 files but is not canonical FEN, and a rank-sum check alone
     // waves it through.
     let e = err("x | 4k3/8/8/8/8/8/8/1111K111 w - - 0 1 | 1:20v");
-    assert!(
-        matches!(e, OracleError::MalformedFen { .. }),
-        "expected MalformedFen, got {e:?}"
-    );
+    assert_eq!(fen_cause(&e), FenError::ConsecutiveSkipDigits { rank: 1 });
 }
 
 #[test]
 fn rejects_en_passant_square_contradicting_the_side_to_move() {
     // After white pushes a pawn two squares the target is on rank 3 and it is black's
     // turn. The reverse pairing is decidable without a board.
+    let e3 = Square::from_uci("e3").expect("a square");
+    let e6 = Square::from_uci("e6").expect("a square");
     let e = err("x | 4k3/8/8/8/8/8/8/4K3 w - e3 0 1 | 1:20v");
-    assert!(
-        matches!(e, OracleError::MalformedFen { .. }),
-        "expected MalformedFen for w-to-move with a rank-3 target, got {e:?}"
+    assert_eq!(
+        fen_cause(&e),
+        FenError::EnPassantRankContradictsSideToMove { square: e3 }
     );
     let e = err("x | 4k3/8/8/8/8/8/8/4K3 b - e6 0 1 | 1:20v");
-    assert!(
-        matches!(e, OracleError::MalformedFen { .. }),
-        "expected MalformedFen for b-to-move with a rank-6 target, got {e:?}"
+    assert_eq!(
+        fen_cause(&e),
+        FenError::EnPassantRankContradictsSideToMove { square: e6 }
     );
 }
 
 #[test]
 fn accepts_en_passant_square_consistent_with_the_side_to_move() {
-    assert!(parse("x | 4k3/8/8/8/8/8/8/4K3 b - e3 0 1 | 1:20v").is_ok());
-    assert!(parse("x | 4k3/8/8/8/8/8/8/4K3 w - e6 0 1 | 1:20v").is_ok());
+    // Both FENs now carry the pawn whose double push produced the target. They did not
+    // before, and they passed anyway, because the old validator only checked the target's
+    // RANK against the side to move. Issue #4's parser also checks that the push could
+    // have happened, so these were strengthened rather than the rule relaxed.
+    //
+    // Note where the pawns are. Black to move with a target on e3 means WHITE pushed
+    // e2-e4, so the white pawn is on e4 — not on e3, which is the square it skipped over
+    // and which must be empty. The obvious repair puts the pawn on the target square and
+    // still violates the rule it is meant to satisfy.
+    assert!(parse("x | 4k3/8/8/8/4P3/8/8/4K3 b - e3 0 1 | 1:20v").is_ok());
+    assert!(parse("x | 4k3/8/8/4p3/8/8/8/4K3 w - e6 0 1 | 1:20v").is_ok());
 }
