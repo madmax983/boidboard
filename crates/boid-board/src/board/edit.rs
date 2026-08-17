@@ -35,7 +35,8 @@
 //! and a key that moved with the clocks could never match.
 
 use crate::board::Board;
-use crate::types::{CastlingRights, Colour, File, Piece, Square};
+use crate::types::{CastlingRight, CastlingRights, Colour, File, Piece, PieceKind, Square};
+use crate::zobrist::ZOBRIST;
 
 impl Board {
     /// Put `piece` on `square`.
@@ -46,12 +47,31 @@ impl Board {
     /// out in that order, so that the captured piece is XORed out of the hash exactly once
     /// and by the same code path as every other removal.
     pub fn place(&mut self, square: Square, piece: Piece) {
-        todo!("Board::place({square}, {piece:?})")
+        assert!(
+            self.piece_at(square).is_none(),
+            "{square} is occupied by {:?}; a capture is take-then-place",
+            self.piece_at(square)
+        );
+        self.write_square(square, Some(piece));
+        self.hash_piece(square, piece);
     }
 
     /// Lift whatever stands on `square`, and return it.
     pub fn take(&mut self, square: Square) -> Option<Piece> {
-        todo!("Board::take({square})")
+        let piece = self.piece_at(square)?;
+        self.write_square(square, None);
+        // XOR is self-inverse, so removing a piece is the same operation as adding it.
+        self.hash_piece(square, piece);
+        Some(piece)
+    }
+
+    /// XOR `piece` on `square` into — or out of — both hashes.
+    fn hash_piece(&mut self, square: Square, piece: Piece) {
+        let key = ZOBRIST.piece_square(piece, square);
+        self.key ^= key;
+        if piece.kind() == PieceKind::Pawn {
+            self.pawn_key ^= key;
+        }
     }
 
     /// Set the side to move.
@@ -60,7 +80,10 @@ impl Board {
     /// way, and a toggle is not idempotent, so a test that applies edits in two different
     /// orders could not use one.
     pub fn set_side_to_move(&mut self, colour: Colour) {
-        todo!("Board::set_side_to_move({colour:?})")
+        if self.stm != colour {
+            self.key ^= ZOBRIST.side_to_move();
+            self.stm = colour;
+        }
     }
 
     /// Set the castling rights, as a whole mask.
@@ -70,7 +93,12 @@ impl Board {
     /// recomputation of the mask. Clearing bits one at a time is the classic depth-four
     /// perft bug.
     pub fn set_castling(&mut self, rights: CastlingRights) {
-        todo!("Board::set_castling({rights:?})")
+        for right in CastlingRight::ALL {
+            if self.castling.has(right) != rights.has(right) {
+                self.key ^= ZOBRIST.castling(right);
+            }
+        }
+        self.castling = rights;
     }
 
     /// Set the en-passant file, or clear it.
@@ -79,20 +107,29 @@ impl Board {
     /// to move first if you are changing both, or [`Board::en_passant_target`] will report
     /// the square for the wrong colour.
     pub fn set_en_passant(&mut self, file: Option<File>) {
-        todo!("Board::set_en_passant({file:?})")
+        // XOR out what is being replaced BEFORE XORing in what replaces it. The `None`
+        // branch of the first half is the one engines forget, and the symptom is a key
+        // that never comes back to a position it has already visited.
+        if let Some(old) = self.ep {
+            self.key ^= ZOBRIST.en_passant(old);
+        }
+        if let Some(new) = file {
+            self.key ^= ZOBRIST.en_passant(new);
+        }
+        self.ep = file;
     }
 
     /// Set the halfmove clock, in plies since the last capture or pawn move.
     ///
     /// Not hashed.
     pub fn set_halfmove_clock(&mut self, plies: u8) {
-        todo!("Board::set_halfmove_clock({plies})")
+        self.halfmove = plies;
     }
 
     /// Set the fullmove number.
     ///
     /// Not hashed.
     pub fn set_fullmove_number(&mut self, number: u16) {
-        todo!("Board::set_fullmove_number({number})")
+        self.fullmove = number;
     }
 }

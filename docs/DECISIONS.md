@@ -929,3 +929,49 @@ Consequences: Threefold repetition will under-detect relative to a strict FIDE 9
   reading -- two positions differing only in a dead ep square hash differently and will not
   be seen as a repetition. That is the price of matching the published perft counts, and it
   is recorded here so #8 does not "fix" it without reading this entry.
+
+---
+
+## D-0022 — The pawn hash covers pawns only
+
+Status:       Accepted
+Date:         2026-08-17
+
+Context:      Issue #4 requires `Board` to carry "a pawn hash" and says nothing else about
+  it. No acceptance criterion constrains it. That combination makes it the field most likely
+  to ship undecided and be quietly wrong forever -- and it is baked into every pinned
+  position literal, so changing it later is not a local edit.
+
+Decision:     The pawn hash is the XOR of the piece-square keys of the pawns of BOTH
+  colours, drawn from the same `piece_square` table as the main key, with a base of 0 and
+  with side-to-move, castling and en-passant excluded.
+
+  Kings are deliberately NOT included, although many engines include them so that a
+  pawn-structure cache can hold king-safety terms. The consumer here is issue #12's
+  pawn-structure evaluator, which does not exist. Guessing the shape of a consumer that has
+  not been written is exactly what D-0010 refused for `Evaluator`, D-0014 for perft divide
+  and D-0018 for the trainer's boundary types; this is the fourth time and the answer is the
+  same.
+
+  Sharing the piece-square table rather than seeding a second one is not only cheaper. It
+  makes an algebraic relation between the two hashes statable, and therefore testable: on a
+  board of pawns and kings only, `key ^ pawn_key` is exactly the two king keys XORed with
+  the side, castling and en-passant contributions. With two independently seeded tables
+  there is no such relation to assert, and "both hashes are maintained" would have to be
+  taken on trust.
+
+Rule:         The pawn-key update lives inside `place` and `take` themselves, so no move
+  application path can forget it -- a promotion and an en-passant capture are ordinary
+  `take`/`place` sequences and are covered by construction. `pawn_key` must be invariant
+  under a null move. Adding kings to it requires a superseding entry, because every pinned
+  `pawn_key` literal in the test suite moves with that change.
+
+Evidence:     `zobrist_incremental::pawn_key_is_invariant_under_every_non_pawn_edit` (all
+  five non-pawn kinds and all three state setters), `pawn_key_tracks_a_promotion`,
+  `pawnless_positions_have_a_zero_pawn_key`, and
+  `key_xor_pawn_key_is_the_non_pawn_contribution`, which is the relation above.
+
+Consequences: Issue #12 gets a hash that changes only when the pawn structure changes, and
+  gets it maintained by the representation rather than by a rule its author has to remember.
+  If it turns out to want kings, that is a superseding entry and a re-pinning of the
+  literals, which is a visible change rather than a silent one.
