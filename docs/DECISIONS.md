@@ -1186,3 +1186,57 @@ Evidence:     `fen_rejection::oracle_rejection_implies_parser_rejection`,
 
 Consequences: Issue #6's differential harness can tell a fixture transcription error from an
   engine disagreement by matching on the variant, rather than by reading a string.
+
+---
+
+## D-0027 — `Copy` without `unmake_move` means #8 threads a zobrist history
+
+Status:       Accepted
+Date:         2026-08-17
+
+Context:      Issue #4 states the consequence itself: "Note the consequence of `Copy` with no
+  `unmake_move`: there is no natural undo stack, so repetition and fifty-move detection
+  require a **separately threaded zobrist history** in the search stack. Engines that omit
+  this repeat in winning positions and no unit test catches it."
+
+Decision:     AC7 has two halves and they need different mechanisms. `Board: Copy` is a
+  compile-time assertion -- removing the derive breaks the build rather than reddening a
+  test -- with the behavioural half (a copy is independent of its original) in
+  `board_consistency.rs`.
+
+  The ABSENCE half cannot be a cargo test: no test can observe that a function is not there.
+  It is a `repo-invariants` shell step, which is also D-0007's argument -- a git-dependent
+  cargo test either fails under a shallow clone or passes vacuously behind a guard. The step
+  greps a SYNONYM SET (`unmake_move`, `unmake`, `undo_move`, `undo`, `take_back`, `revert`,
+  `restore_state`/`restore_position`/`restore_board`) rather than one identifier, because
+  satisfying the criterion by renaming would satisfy its letter and none of its intent. It
+  carries a positive control in the same step, because an absence check that cannot find
+  anything proves nothing, and it is restricted to `*.rs`, because `docs/TRAINER.md`
+  contains the literal `unmake_move` as prose.
+
+  `ZobristHistory` is deliberately NOT shipped. It would be a type in the workspace's
+  dependency root whose only consumer is issue #8, and whose shape depends on decisions #8
+  has not made -- how the search stack is laid out, whether the history is a slice or a ring,
+  where the root offset lives. That is the fourth application of the argument D-0010 made
+  for `Evaluator`, D-0014 for perft divide and D-0018 for the trainer's boundary types.
+
+  `Board`'s derived `PartialEq` INCLUDES the clocks, so board equality is not the repetition
+  relation. `move_order_returning_to_the_start_is_a_repetition_not_a_transposition`
+  demonstrates the difference rather than leaving #8 to discover it: after 1.Nf3 Nf6 2.Ng1
+  Ng8 the key equals the starting position's and the board does not.
+
+Rule:         A search entry point in `boid-search` that cannot see the zobrist keys of the
+  moves played to reach its root must not exist. AC7's intended reading is any undo
+  affordance on the value type -- an `unmake`, an `undo`, an `UndoInfo` struct returned by
+  `make_move` -- not one identifier. Every absence assertion in `repo-invariants` must carry
+  a positive control in the same step, generalising the existence guard the D-0008 ASCII
+  check already uses.
+
+Evidence:     `board_layout::board_is_copy`;
+  `board_consistency::a_copy_is_independent_of_its_original`;
+  `zobrist_incremental::move_order_returning_to_the_start_is_a_repetition_not_a_transposition`;
+  the `repo-invariants` step and its positive control.
+
+Consequences: Issue #8 inherits a stated obligation rather than a discovered one. The
+  halfmove clock this issue stores counts PLIES; the fifty-move threshold is #8's, because
+  it is a search rule rather than a representation one.

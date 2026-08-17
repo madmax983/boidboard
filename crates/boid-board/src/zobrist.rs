@@ -122,6 +122,19 @@ impl Zobrist {
     }
 
     /// The key XORed in when Black is to move.
+    ///
+    /// # Examples
+    ///
+    /// A doctest runs in its own process, so this pin is a second-process check of the key
+    /// set for free — and it lives in a different file from the digest in
+    /// `tests/zobrist_tables.rs`, which is what catches a careless "just update the
+    /// constant" when the seed is changed.
+    ///
+    /// ```
+    /// use boid_board::zobrist::ZOBRIST;
+    ///
+    /// assert_eq!(ZOBRIST.side_to_move(), 0x9C1E_D7FF_B9DE_746C);
+    /// ```
     #[must_use]
     pub const fn side_to_move(&self) -> u64 {
         self.side_to_move
@@ -165,3 +178,25 @@ impl Zobrist {
         }
     }
 }
+
+/// Whether every key in the flat index space is non-zero.
+///
+/// O(n) and measured free at compile time. Its O(n^2) sibling — all keys distinct — was
+/// measured at roughly +450 ms on every compile of this crate and lives in
+/// `tests/zobrist_tables.rs` instead (D-0020).
+const fn no_flat_key_is_zero(zobrist: &Zobrist) -> bool {
+    let mut index = 0;
+    while index < Zobrist::LEN {
+        if zobrist.flat(index) == 0 {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+// Forcing the table through const evaluation is AC4's structural half: the const
+// interpreter has no clock, no I/O, no entropy and no FFI, so a per-process key is not
+// something these assertions detect — it is something they make impossible.
+const _: () = assert!(ZOBRIST.flat(0) == 0xED3A_9728_7F13_1635);
+const _: () = assert!(no_flat_key_is_zero(&ZOBRIST));
