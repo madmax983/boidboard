@@ -1083,6 +1083,9 @@ Decision:     The register:
                                 4+ en-passant states, both sides, one clock >= 100
                                 fen_roundtrip::the_generated_corpus_round_trips_byte_identically
     proptest transitive tree    18 crates with default features off (39 with them on)
+    Stockfish differential      179 legal root moves over 6 positions, agreeing on five of
+                                the six FEN fields
+                                apply_move_differential::applying_every_legal_root_move_agrees_with_stockfish
 
   Deferrals recorded rather than skipped, each with the issue that revisits it:
 
