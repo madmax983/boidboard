@@ -44,7 +44,7 @@ use core::fmt;
 use core::str::FromStr;
 
 use crate::board::Board;
-use crate::types::{CastlingRight, Colour, Square};
+use crate::types::{CastlingRight, CastlingRights, Colour, File, Piece, PieceKind, Rank, Square};
 
 /// The longest FEN this crate can emit, in bytes.
 ///
@@ -451,6 +451,16 @@ impl fmt::Display for FenError {
 
 impl core::error::Error for FenError {}
 
+/// The FEN fields, in order, for reporting an empty one.
+const FIELD_ORDER: [FenField; 6] = [
+    FenField::Placement,
+    FenField::SideToMove,
+    FenField::Castling,
+    FenField::EnPassant,
+    FenField::Halfmove,
+    FenField::Fullmove,
+];
+
 impl Board {
     /// Parse a six-field FEN.
     ///
@@ -460,8 +470,20 @@ impl Board {
     /// # Errors
     ///
     /// Returns the first [`FenError`] the string or the resulting position violates.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boid_board::Board;
+    ///
+    /// let board = Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")?;
+    /// assert_eq!(board, Board::startpos());
+    /// assert_eq!(board.to_fen(), "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+    /// # Ok::<(), boid_board::FenError>(())
+    /// ```
     pub fn from_fen(fen: &str) -> Result<Board, FenError> {
-        todo!("Board::from_fen({fen:?})")
+        let (board, _) = parse(fen, false)?;
+        Ok(board)
     }
 
     /// Parse a four- or six-field FEN, reporting which it was.
@@ -471,14 +493,30 @@ impl Board {
     /// # Errors
     ///
     /// Returns the first [`FenError`] the string or the resulting position violates.
+    ///
+    /// # Examples
+    ///
+    /// The published Kiwipete FEN omits the counters, and round-trips as published:
+    ///
+    /// ```
+    /// use boid_board::{Board, FenLayout};
+    ///
+    /// let published = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -";
+    /// let (board, layout) = Board::from_fen_with_layout(published)?;
+    ///
+    /// assert_eq!(layout, FenLayout::FourField);
+    /// assert_eq!(board.to_fen_with_layout(layout), published);
+    /// assert_eq!(board.to_fen(), format!("{published} 0 1"));
+    /// # Ok::<(), boid_board::FenError>(())
+    /// ```
     pub fn from_fen_with_layout(fen: &str) -> Result<(Board, FenLayout), FenError> {
-        todo!("Board::from_fen_with_layout({fen:?})")
+        parse(fen, true)
     }
 
     /// Emit this position as a six-field FEN.
     #[must_use]
     pub fn to_fen(&self) -> String {
-        todo!("Board::to_fen")
+        self.to_fen_with_layout(FenLayout::SixField)
     }
 
     /// Emit this position in the given layout.
@@ -489,7 +527,13 @@ impl Board {
     /// defaults anyway.
     #[must_use]
     pub fn to_fen_with_layout(&self, layout: FenLayout) -> String {
-        todo!("Board::to_fen_with_layout({layout:?})")
+        let mut fen = String::with_capacity(FEN_MAX_LEN);
+        // Writing into a String cannot fail: its `fmt::Write` impl never returns Err. The
+        // result is discarded rather than unwrapped because this module denies both
+        // `unwrap_used` and `expect_used`, and a panic here would be a panic in the
+        // emitter, which AC2 is about not having.
+        let _ = self.write_fen(&mut fen, layout);
+        fen
     }
 
     /// Write this position's FEN into an existing buffer.
@@ -497,13 +541,398 @@ impl Board {
     /// The primitive the other two are built on, so that issue #7's UCI loop and issue #19's
     /// PGN writer can emit into a buffer they already own.
     ///
+    /// Reads the **mailbox**, while [`Board::recomputed_key`] reads the bitboards. That
+    /// crossing is deliberate (D-0019): it makes every round-trip test that also checks a
+    /// key into a check on the board's redundancy, for free.
+    ///
     /// # Errors
     ///
     /// Propagates whatever `w` returns.
     pub fn write_fen<W: fmt::Write>(&self, w: &mut W, layout: FenLayout) -> fmt::Result {
-        let _ = w;
-        todo!("Board::write_fen({layout:?})")
+        for (index, rank) in Rank::ALL.iter().rev().enumerate() {
+            if index > 0 {
+                w.write_char('/')?;
+            }
+            let mut empty: u32 = 0;
+            for file in File::ALL {
+                match self.piece_at(Square::from_file_rank(file, *rank)) {
+                    Some(piece) => {
+                        write_empty_run(w, empty)?;
+                        empty = 0;
+                        w.write_char(piece.to_char())?;
+                    }
+                    None => empty = empty.saturating_add(1),
+                }
+            }
+            write_empty_run(w, empty)?;
+        }
+
+        w.write_char(' ')?;
+        w.write_char(self.side_to_move().to_char())?;
+
+        w.write_char(' ')?;
+        if self.castling().is_empty() {
+            w.write_char('-')?;
+        } else {
+            for right in CastlingRight::ALL {
+                if self.castling().has(right) {
+                    w.write_char(right.to_char())?;
+                }
+            }
+        }
+
+        w.write_char(' ')?;
+        match self.en_passant_target() {
+            Some(square) => write!(w, "{square}")?,
+            None => w.write_char('-')?,
+        }
+
+        if layout == FenLayout::SixField {
+            write!(w, " {} {}", self.halfmove_clock(), self.fullmove_number())?;
+        }
+
+        Ok(())
     }
+}
+
+/// Write a run of empty squares as a single digit, or nothing if the run is empty.
+fn write_empty_run<W: fmt::Write>(w: &mut W, empty: u32) -> fmt::Result {
+    if empty == 0 {
+        return Ok(());
+    }
+    match char::from_digit(empty, 10) {
+        Some(digit) => w.write_char(digit),
+        // Unreachable: a run cannot exceed the eight files of a rank.
+        None => Err(fmt::Error),
+    }
+}
+
+/// Parse a FEN, optionally accepting the four-field form.
+fn parse(fen: &str, accept_four_fields: bool) -> Result<(Board, FenLayout), FenError> {
+    // FIRST, before anything else looks at the string. After this, every byte index is a
+    // character boundary, so no later slice can split a code point — which is what turns
+    // AC2's "never panics" from a claim about testing into a property of the code.
+    if let Some(byte_offset) = fen.bytes().position(|byte| !byte.is_ascii()) {
+        return Err(FenError::NonAscii { byte_offset });
+    }
+
+    // `split(' ')`, never `split_whitespace`: the latter treats U+00A0 as a separator, so an
+    // NBSP-separated FEN would parse HERE into a valid position while Stockfish parses the
+    // same bytes into a different one (D-0008). The check above makes that unreachable, and
+    // this keeps it unreachable if the check is ever moved.
+    let mut count: usize = 0;
+    for (index, field) in fen.split(' ').enumerate() {
+        count = count.saturating_add(1);
+        if field.is_empty() {
+            return Err(FenError::EmptyField {
+                field: field_at(index),
+            });
+        }
+    }
+
+    let layout = match count {
+        6 => FenLayout::SixField,
+        4 if accept_four_fields => FenLayout::FourField,
+        _ => return Err(FenError::FieldCount { found: count }),
+    };
+
+    let mut fields = fen.split(' ');
+    let placement = fields.next().ok_or(FenError::FieldCount { found: count })?;
+    let side = fields.next().ok_or(FenError::FieldCount { found: count })?;
+    let castling = fields.next().ok_or(FenError::FieldCount { found: count })?;
+    let en_passant = fields.next().ok_or(FenError::FieldCount { found: count })?;
+
+    let side_to_move = parse_side_to_move(side)?;
+
+    let mut board = Board::empty();
+    board.set_side_to_move(side_to_move);
+    parse_placement(&mut board, placement)?;
+    board.set_castling(parse_castling(castling)?);
+    board.set_en_passant(parse_en_passant(en_passant, side_to_move)?);
+
+    if layout == FenLayout::SixField {
+        let halfmove = fields.next().ok_or(FenError::FieldCount { found: count })?;
+        let fullmove = fields.next().ok_or(FenError::FieldCount { found: count })?;
+        board.set_halfmove_clock(parse_clock(halfmove, ClockField::Halfmove)? as u8);
+        let number = parse_clock(fullmove, ClockField::Fullmove)?;
+        if number == 0 {
+            return Err(FenError::FullmoveNumberZero);
+        }
+        board.set_fullmove_number(number as u16);
+    }
+
+    check_board_legality(&board)?;
+    Ok((board, layout))
+}
+
+/// Which field an index names, for reporting an empty one. An index past the sixth field can
+/// only come from a trailing separator, which is reported against the last field.
+fn field_at(index: usize) -> FenField {
+    match FIELD_ORDER.get(index) {
+        Some(field) => *field,
+        None => FenField::Fullmove,
+    }
+}
+
+fn parse_side_to_move(field: &str) -> Result<Colour, FenError> {
+    let mut chars = field.chars();
+    let first = chars.next();
+    match (first, chars.next()) {
+        (Some(ch), None) => Colour::from_char(ch).ok_or(FenError::SideToMove { found: Some(ch) }),
+        _ => Err(FenError::SideToMove { found: first }),
+    }
+}
+
+/// Fill `board`'s squares from the placement field.
+///
+/// Validates a rank completely before placing any of it, so a rejected FEN never leaves a
+/// half-built position behind and a run that overflows the eighth file cannot index off the
+/// end of a rank while being counted.
+fn parse_placement(board: &mut Board, field: &str) -> Result<(), FenError> {
+    let mut ranks: usize = 0;
+    for _ in field.split('/') {
+        ranks = ranks.saturating_add(1);
+    }
+    if ranks != 8 {
+        return Err(FenError::RankCount { found: ranks });
+    }
+
+    for (index, rank_field) in field.split('/').enumerate() {
+        // FEN writes rank 8 first. `index` counts down from there.
+        let rank_number = 8u8.saturating_sub(index as u8);
+        let rank = Rank::from_index(7u8.saturating_sub(index as u8))
+            .ok_or(FenError::RankCount { found: ranks })?;
+
+        let mut files: u8 = 0;
+        let mut previous_was_digit = false;
+        for ch in rank_field.chars() {
+            if ch.is_ascii_digit() {
+                // Digit validity before adjacency: '0' and '9' are never legal in a
+                // placement field whatever their neighbours are, and reporting "consecutive
+                // digits" for "30" would send the reader looking at the wrong rule.
+                let run = match ch.to_digit(10) {
+                    Some(run @ 1..=8) => run,
+                    _ => {
+                        return Err(FenError::DigitOutOfRange {
+                            rank: rank_number,
+                            ch,
+                        });
+                    }
+                };
+                if previous_was_digit {
+                    // "44" sums to 8 and is not canonical FEN for "8". Accepting it would
+                    // mean emitting a different string than was parsed.
+                    return Err(FenError::ConsecutiveDigits { rank: rank_number });
+                }
+                previous_was_digit = true;
+                files = files.saturating_add(run as u8);
+            } else {
+                previous_was_digit = false;
+                if Piece::from_char(ch).is_none() {
+                    return Err(FenError::PieceChar {
+                        rank: rank_number,
+                        ch,
+                    });
+                }
+                files = files.saturating_add(1);
+            }
+        }
+        if files != 8 {
+            return Err(FenError::RankWidth {
+                rank: rank_number,
+                files,
+            });
+        }
+
+        // Second pass: the rank is known to be well-formed, so every square exists.
+        let mut file_index: u8 = 0;
+        for ch in rank_field.chars() {
+            match ch.to_digit(10) {
+                Some(run) => file_index = file_index.saturating_add(run as u8),
+                None => {
+                    let piece = Piece::from_char(ch).ok_or(FenError::PieceChar {
+                        rank: rank_number,
+                        ch,
+                    })?;
+                    let file = File::from_index(file_index).ok_or(FenError::RankWidth {
+                        rank: rank_number,
+                        files: file_index,
+                    })?;
+                    board.place(Square::from_file_rank(file, rank), piece);
+                    file_index = file_index.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Parse the castling field.
+///
+/// The rights must appear as a strictly increasing subsequence of `KQkq`, which gets
+/// duplicate detection and order checking out of one scan — and which is what makes emission
+/// the exact inverse of parsing.
+fn parse_castling(field: &str) -> Result<CastlingRights, FenError> {
+    if field == "-" {
+        return Ok(CastlingRights::NONE);
+    }
+
+    let mut rights = CastlingRights::NONE;
+    let mut highest: Option<usize> = None;
+    for ch in field.chars() {
+        let Some(right) = CastlingRight::from_char(ch) else {
+            // Shredder-FEN and X-FEN name the rook's file instead. Named rather than
+            // mapped: mapping would emit a different string than was parsed, and would
+            // silently accept a Chess960 position this crate cannot represent.
+            if ch.is_ascii_alphabetic() && matches!(ch.to_ascii_lowercase(), 'a'..='h') {
+                return Err(FenError::CastlingShredderNotation { ch });
+            }
+            return Err(FenError::CastlingChar { ch });
+        };
+        if rights.has(right) {
+            return Err(FenError::CastlingDuplicate { ch });
+        }
+        if let Some(previous) = highest
+            && right.index() <= previous
+        {
+            return Err(FenError::CastlingOrder { ch });
+        }
+        highest = Some(right.index());
+        rights = rights.with(right);
+    }
+
+    Ok(rights)
+}
+
+/// Parse the en-passant field into the file it names.
+///
+/// The rank is checked against the side to move and then discarded: the board stores the
+/// file, because the rank follows from the side to move (D-0021).
+fn parse_en_passant(field: &str, side_to_move: Colour) -> Result<Option<File>, FenError> {
+    if field == "-" {
+        return Ok(None);
+    }
+
+    let mut chars = field.chars();
+    let (Some(file_char), Some(rank_char), None) = (chars.next(), chars.next(), chars.next())
+    else {
+        return Err(FenError::EnPassantSyntax {
+            len: field.chars().count(),
+        });
+    };
+
+    let Some(file) = File::from_char(file_char) else {
+        return Err(FenError::EnPassantSquare {
+            file: file_char,
+            rank: rank_char,
+        });
+    };
+    if rank_char != '3' && rank_char != '6' {
+        return Err(FenError::EnPassantSquare {
+            file: file_char,
+            rank: rank_char,
+        });
+    }
+
+    // After White pushes two squares the target is on rank 3 and it is Black's turn. The
+    // contradiction is decidable without a board, so it is caught here rather than below.
+    let expected = match side_to_move {
+        Colour::White => '6',
+        Colour::Black => '3',
+    };
+    if rank_char != expected {
+        return Err(FenError::EnPassantRankContradictsSideToMove {
+            rank: rank_char,
+            side_to_move,
+        });
+    }
+
+    Ok(Some(file))
+}
+
+/// Parse one counter. Rejects rather than saturates: a silently clamped counter cannot
+/// round-trip, and AC1 says it must.
+fn parse_clock(field: &str, which: ClockField) -> Result<u32, FenError> {
+    if let Some(ch) = field.chars().find(|ch| !ch.is_ascii_digit()) {
+        return Err(FenError::ClockNotANumber { field: which, ch });
+    }
+    if field.len() > 1 && field.starts_with('0') {
+        return Err(FenError::ClockLeadingZero { field: which });
+    }
+
+    let value: u32 = field.parse().map_err(|_| FenError::ClockOutOfRange {
+        field: which,
+        max: which.max(),
+    })?;
+    if value > which.max() {
+        return Err(FenError::ClockOutOfRange {
+            field: which,
+            max: which.max(),
+        });
+    }
+    Ok(value)
+}
+
+/// The rules that need the assembled board but not a single generated move.
+///
+/// Deliberately absent: "the side not to move is in check", which needs attack generation
+/// and belongs to issue #5; kings-adjacent; and material bounds (D-0025).
+fn check_board_legality(board: &Board) -> Result<(), FenError> {
+    for side in Colour::ALL {
+        let kings = (board.pieces(PieceKind::King) & board.colours(side)).count();
+        if kings != 1 {
+            return Err(FenError::KingCount {
+                side,
+                found: u8::try_from(kings).unwrap_or(u8::MAX),
+            });
+        }
+    }
+
+    for square in board.pieces(PieceKind::Pawn) {
+        if square.rank() == Rank::R1 || square.rank() == Rank::R8 {
+            return Err(FenError::PawnOnBackRank { square });
+        }
+    }
+
+    for right in CastlingRight::ALL {
+        if !board.castling().has(right) {
+            continue;
+        }
+        let colour = right.colour();
+        if board.piece_at(right.king_from()) != Some(Piece::new(colour, PieceKind::King)) {
+            return Err(FenError::CastlingWithoutKing { right });
+        }
+        if board.piece_at(right.rook_from()) != Some(Piece::new(colour, PieceKind::Rook)) {
+            return Err(FenError::CastlingWithoutRook { right });
+        }
+    }
+
+    if let Some(file) = board.en_passant_file() {
+        // The pawn that double-pushed belongs to the side NOT to move. Black to move means
+        // White has just played, so the target is on rank 3, the pawn came from rank 2 and
+        // now stands on rank 4.
+        let (target_rank, origin_rank, pusher_rank) = match board.side_to_move() {
+            Colour::Black => (Rank::R3, Rank::R2, Rank::R4),
+            Colour::White => (Rank::R6, Rank::R7, Rank::R5),
+        };
+        let target = Square::from_file_rank(file, target_rank);
+        let origin = Square::from_file_rank(file, origin_rank);
+        let pusher_square = Square::from_file_rank(file, pusher_rank);
+        let pusher = Piece::new(board.side_to_move().flip(), PieceKind::Pawn);
+
+        if board.piece_at(target).is_some() {
+            return Err(FenError::EnPassantTargetOccupied { square: target });
+        }
+        if board.piece_at(origin).is_some() {
+            return Err(FenError::EnPassantOriginOccupied { square: origin });
+        }
+        if board.piece_at(pusher_square) != Some(pusher) {
+            return Err(FenError::EnPassantNoDoublePushedPawn { square: target });
+        }
+    }
+
+    Ok(())
 }
 
 impl FromStr for Board {

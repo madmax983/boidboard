@@ -975,3 +975,107 @@ Consequences: Issue #12 gets a hash that changes only when the pawn structure ch
   gets it maintained by the representation rather than by a rule its author has to remember.
   If it turns out to want kings, that is a superseding entry and a re-pinning of the
   literals, which is a visible change rather than a silent one.
+
+---
+
+## D-0023 — FEN strictness follows from byte-identical round-trip
+
+Status:       Accepted
+Date:         2026-08-17
+
+Context:      Issue #4 AC1 requires that FEN parse then emit reproduces its input byte for
+  byte. The emitter has exactly one spelling for any position, so any non-canonical input the
+  parser ACCEPTS is an AC1 failure by construction. AC1 and AC2 are therefore one requirement
+  seen from two sides, and every judgement call about leniency is already decided.
+
+Decision:     Every normalisable spelling is an error, never a normalisation:
+
+    castling rights out of KQkq order          CastlingOrder
+    a repeated castling right                  CastlingDuplicate
+    Shredder-FEN / X-FEN castling (HAha)       CastlingShredderNotation, named not mapped
+    a leading zero in a counter (01)           ClockLeadingZero
+    two adjacent placement digits (44 for 8)   ConsecutiveDigits
+    the digits 0 and 9 in a placement rank     DigitOutOfRange
+    an uppercase en-passant square (E6)        EnPassantSquare
+    a doubled, leading or trailing separator   EmptyField
+    a counter wider than the field stores      ClockOutOfRange -- rejected, never saturated
+
+  Counter bounds are the widths of the fields the board stores -- 0..=255 plies and
+  1..=65535 moves -- not a chess rule. Rejecting at 100 because of the fifty-move rule would
+  refuse real puzzle exports, whose exporters routinely reset the fullmove number while
+  leaving a large halfmove clock; nothing representable is lost, because the seventy-five-
+  move rule ends a game at 150 plies.
+
+  Parsing does not normalise the POSITION either: an en-passant square whose capture is
+  unavailable is kept (D-0021), and castling rights are never dropped for being
+  unexercisable. Stockfish does both of those on input. Either would break AC1.
+
+  Two mechanical rules make AC2's "never panics" a property of the code rather than a claim
+  about how much testing was done. First, the parser rejects any non-ASCII byte BEFORE
+  anything else looks at the string, after which every byte index is a character boundary
+  and no slice can split a code point. Second, `src/fen.rs` denies
+  `clippy::indexing_slicing`, `unwrap_used`, `expect_used`, `panic` and
+  `arithmetic_side_effects` at module scope, so the usual routes to a panic are closed by
+  the compiler under the existing `-D warnings` CI job.
+
+Rule:         `Board::from_fen` splits on ASCII `' '` and never uses `split_whitespace`,
+  which treats U+00A0 as a separator and would parse an NBSP-separated FEN into a valid
+  position here while Stockfish parses the same bytes into a different one (D-0008, followed
+  through into our own parser). Parsing never rewrites what it was given: an inconsistent or
+  non-canonical FEN is an error, never silently altered.
+
+Evidence:     `fen_rejection::adversarial_inputs_map_to_specific_variants` pins ~70 inputs to
+  named variants rather than to `is_err()`;
+  `fen_rejection::every_declared_variant_is_reached_by_the_corpus` fails if the corpus stops
+  exercising a rule; `nbsp_separated_fen_is_rejected`; `the_ascii_check_comes_first`;
+  `single_byte_substitutions_never_panic` (several thousand near-miss FENs);
+  `every_prefix_of_every_fixture_fen_is_rejected_or_parses`.
+
+Consequences: Issue #7's UCI layer will meet FENs this crate refuses that other engines
+  accept. That leniency belongs there, as a documented policy over `FenError`, and not here
+  -- a lenient parser under a canonicalising emitter is exactly the pair that round-trips its
+  own output forever and never round-trips its input.
+
+---
+
+## D-0024 — `FenLayout` resolves the four-field Kiwipete; no dialect bit enters `Board`
+
+Status:       Accepted
+Date:         2026-08-17
+
+Context:      D-0008 stores the published Kiwipete FEN with four fields, as published,
+  guarded by `kiwipete_fen_has_four_fields` and by the fixture's pinned SHA-256. AC1 requires
+  byte-identical round-tripping of all six perft positions, and one of them therefore has no
+  counters to emit.
+
+Decision:     The field count is returned by the parser and passed to the emitter --
+  `from_fen_with_layout` / `to_fen_with_layout` -- with `from_fen` / `to_fen` as the
+  canonical six-field pair. Absent counters default to a halfmove clock of 0 and a fullmove
+  number of 1.
+
+  A "dialect bit" inside `Board` was rejected, and not merely because it would be meaningless
+  after a move is made. Beside a zobrist key it is actively hazardous: it would make two
+  positions with identical pieces, side, castling and en-passant compare unequal, and it
+  would have to be excluded by hand from `Eq` and from every hash.
+
+  Four-field emission from a board whose clocks are not the defaults is lossy, documented,
+  and deliberately NOT fallible: the layout exists to reproduce a published FEN byte for
+  byte, and a position that came from one carries the defaults anyway.
+
+  Named and rejected so that review does not have to rediscover it: "emit four fields when
+  the clocks are 0 and 1". The starting position IS 0 and 1, so that rule would emit four
+  fields for the most-quoted FEN in chess and fail its own round-trip.
+
+Rule:         `tests/fixtures/perft_oracle.txt` and `ORACLE_SHA256` are not to be edited by
+  this or any later issue in order to simplify a parser. The fixture stores what was
+  published; the code adapts to it.
+
+Evidence:     `fen_roundtrip::kiwipete_round_trips_in_its_published_four_field_form`,
+  `four_field_parse_defaults_the_clocks`, `four_field_emission_is_documented_lossy`,
+  `startpos_would_not_round_trip_under_clock_sniffing`, and
+  `zobrist_incremental::four_and_six_field_kiwipete_hash_identically`, which is the
+  assertion a dialect bit inside `Board` would fail.
+
+Consequences: Issue #19's PGN writer gets `write_fen`, which takes the layout as a
+  parameter and writes into a caller-owned buffer, rather than a `Board` that remembers how
+  it was spelled.

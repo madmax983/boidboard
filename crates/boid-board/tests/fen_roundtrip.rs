@@ -280,15 +280,19 @@ fn from_fen_returns_a_fresh_board() {
     let mut board = Board::from_fen(fixture_fen("position6")).expect("must parse");
     assert_eq!(
         board.occupied().count(),
-        26,
-        "position6 is a crowded middlegame"
+        32,
+        "position6 is a full-material middlegame"
     );
     board = Board::from_fen(fixture_fen("position3")).expect("must parse");
     assert_eq!(
         board,
         Board::from_fen(fixture_fen("position3")).expect("must parse")
     );
-    assert_eq!(board.occupied().count(), 8, "position3 has eight pieces");
+    assert_eq!(
+        board.occupied().count(),
+        10,
+        "position3 is a ten-piece endgame"
+    );
 }
 
 #[test]
@@ -306,8 +310,17 @@ fn fen_max_len_is_tight() {
     crowded.set_halfmove_clock(u8::MAX);
     crowded.set_fullmove_number(u16::MAX);
     crowded.set_castling(CastlingRights::ALL);
+    // An en-passant square costs two characters where "-" costs one. No legal position has
+    // both a full board and an en-passant target — but the editing primitives can build
+    // one, and the buffer has to cover what the emitter can be handed, not what a legal
+    // game can reach.
+    crowded.set_en_passant(Some(File::E));
     let longest = crowded.to_fen();
     assert_eq!(longest.len(), FEN_MAX_LEN, "{longest}");
+    assert_eq!(
+        crowded.to_fen_with_layout(FenLayout::FourField).len(),
+        FEN_MAX_LEN - " 255 65535".len()
+    );
 
     for (id, fen) in fixture_fens() {
         assert!(fen.len() <= FEN_MAX_LEN, "{id} is longer than the maximum");

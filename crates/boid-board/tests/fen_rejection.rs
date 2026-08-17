@@ -99,7 +99,9 @@ fn corpus() -> Vec<(&'static str, &'static str)> {
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq \u{2013} 0 1",
             "NonAscii",
         ),
-        ("", "FieldCount"),
+        // The empty string is one empty field, and saying so is more useful than
+        // "expected 4 or 6 fields, found 1".
+        ("", "EmptyField"),
         ("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR", "FieldCount"),
         (
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -",
@@ -158,7 +160,7 @@ fn corpus() -> Vec<(&'static str, &'static str)> {
         // --- en passant ---
         ("4k3/8/8/8/8/8/8/4K3 w - e 0 1", "EnPassantSyntax"),
         ("4k3/8/8/8/8/8/8/4K3 w - e63 0 1", "EnPassantSyntax"),
-        ("4k3/8/8/8/8/8/8/4K3 w - -- 0 1", "EnPassantSyntax"),
+        ("4k3/8/8/8/8/8/8/4K3 w - -- 0 1", "EnPassantSquare"),
         ("4k3/8/8/8/8/8/8/4K3 w - e9 0 1", "EnPassantSquare"),
         ("4k3/8/8/8/8/8/8/4K3 w - i6 0 1", "EnPassantSquare"),
         ("4k3/8/8/8/8/8/8/4K3 w - E6 0 1", "EnPassantSquare"),
@@ -196,9 +198,9 @@ fn corpus() -> Vec<(&'static str, &'static str)> {
         ("4k3/8/8/8/8/8/8/P3K3 w - - 0 1", "PawnOnBackRank"),
         ("p3k3/8/8/8/8/8/8/4K3 w - - 0 1", "PawnOnBackRank"),
         ("4k3/8/8/8/8/8/8/R3K3 w K - 0 1", "CastlingWithoutRook"),
-        ("r3k3/8/8/8/8/8/8/4K2R w Kq - 0 1", "CastlingWithoutRook"),
-        ("4k3/8/8/8/8/8/8/R3K3 w Q - 0 1", "CastlingWithoutKing"),
-        ("r3k2r/8/8/8/8/8/8/R6R w KQ - 0 1", "CastlingWithoutKing"),
+        ("4k2r/8/8/8/8/8/8/4K2R w Kq - 0 1", "CastlingWithoutRook"),
+        ("4k3/8/8/8/8/8/8/R2K4 w Q - 0 1", "CastlingWithoutKing"),
+        ("r3k2r/8/8/8/8/8/8/R2K3R w KQ - 0 1", "CastlingWithoutKing"),
         // The en-passant triple: target empty, origin empty, pusher present.
         (
             "4k3/8/8/8/4P3/4P3/8/4K3 b - e3 0 1",
@@ -385,7 +387,7 @@ fn castling_rights_must_be_backed_by_a_king_and_a_rook() {
         Err(FenError::CastlingWithoutRook { .. })
     ));
     assert!(matches!(
-        Board::from_fen("4k3/8/8/8/8/8/8/R3K3 w Q - 0 1"),
+        Board::from_fen("4k3/8/8/8/8/8/8/R2K4 w Q - 0 1"),
         Err(FenError::CastlingWithoutKing { .. })
     ));
     // And the well-formed version is accepted, so the rule is not simply "reject castling".
@@ -433,10 +435,12 @@ fn every_prefix_of_every_fixture_fen_is_rejected_or_parses() {
     }
 
     assert!(checked > 400, "checked {checked} prefixes");
-    assert_eq!(
-        accepted, 0,
-        "no proper prefix of a fixture FEN is itself a FEN"
-    );
+    // Not zero, and the reason is worth writing down: a six-field FEN *contains* a valid
+    // four-field FEN as a prefix, and truncating a multi-digit fullmove number can leave a
+    // valid one behind (position6's "... - 0 10" has the valid prefix "... - 0 1"). Six of
+    // the seven fixture rows are six-field, giving six four-field prefixes, plus that one.
+    // Pinned, because a change in this number means the parser's acceptance moved.
+    assert_eq!(accepted, 7, "accepted prefixes");
 }
 
 #[test]
