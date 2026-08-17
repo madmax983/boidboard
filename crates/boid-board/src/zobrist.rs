@@ -41,8 +41,10 @@ const SEED: u64 = 0x626F_6964_626F_6172;
 /// party: the published seed-0 output vectors.
 #[must_use]
 pub const fn splitmix64(z: u64) -> u64 {
-    let _ = z;
-    0
+    let mut z = z;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 /// The key for one flat index.
