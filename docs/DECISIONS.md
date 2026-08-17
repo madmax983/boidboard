@@ -1179,3 +1179,52 @@ Evidence:     The `repo-invariants` job's "decision-log citations resolve" step;
 
 Consequences: Issue #5 inherits a decision log whose citations are mechanically checked,
   and a corrected account of why the zobrist table cannot come from entropy.
+
+---
+
+## D-0029 — The mailbox is `[Option<Piece>; 64]`, not the issue's literal `[u8; 64]`
+
+Status:       Accepted
+Date:         2026-08-17
+
+Context:      Issue #4 specifies "a redundant `mailbox: [u8; 64]` for piece-on-square
+  lookup". The implementation uses `[Option<Piece>; 64]`. That is a deviation from the
+  issue's literal text, and an undeclared deviation is exactly what this log exists to
+  prevent -- so it is declared here rather than left for a reader to notice.
+
+Decision:     The field is `[Option<Piece>; 64]`.
+
+  It costs nothing. `Piece` has twelve variants, so four discriminants are unused and the
+  compiler uses one as `None`'s niche:
+
+      size_of::<Piece>()            1
+      size_of::<Option<Piece>>()    1
+      size_of::<[Option<Piece>; 64]>()  64
+
+  which is the same 64 bytes the issue's `[u8; 64]` would occupy, and the same contribution
+  to `size_of::<Board>() == 152`.
+
+  What it buys is that the emptiness test IS the range check. With `[u8; 64]` every read
+  must map a byte back to a piece and decide what an out-of-range byte means -- a sentinel
+  convention that has to be agreed by every caller and can be violated by any of them.
+  With `Option<Piece>` the invalid states are unrepresentable, and the compiler enforces it
+  rather than a comment.
+
+  The reading is that the issue is specifying a REDUNDANT 64-BYTE PIECE-ON-SQUARE ARRAY,
+  and that `[u8; 64]` is how that is spelled in a language without niche optimisation. The
+  size, the redundancy and the lookup cost are all preserved exactly.
+
+  The assumption this rests on -- that the niche exists -- is not left implicit:
+  `board_layout::the_option_piece_niche_costs_nothing` asserts all three sizes, so a future
+  toolchain that stopped niche-packing would fail loudly rather than silently growing
+  `Board` by 64 bytes.
+
+Rule:         The mailbox must remain 64 bytes and must remain redundant with the
+  bitboards. Any representation change that alters `size_of::<Board>()` requires a
+  superseding entry.
+
+Evidence:     `board_layout::the_option_piece_niche_costs_nothing` and
+  `board_layout::board_is_exactly_one_hundred_and_fifty_two_bytes`.
+
+Consequences: `Board::piece_at` returns `Option<Piece>` directly with no decoding step, and
+  issue #5's move generation cannot construct an invalid mailbox byte.
