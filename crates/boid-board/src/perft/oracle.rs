@@ -168,7 +168,7 @@ pub enum OracleError {
         /// 1-based line number in the fixture.
         line: usize,
         /// Why the FEN was rejected. Typed rather than stringly, so a caller can branch on
-        /// the cause — the deferral D-0014 recorded against issue #4, closed by D-0022.
+        /// the cause — the deferral D-0014 recorded against issue #4, closed by D-0023.
         source: FenError,
     },
     /// A position carried no depth data at all.
@@ -362,7 +362,7 @@ pub fn parse(text: &str) -> Result<Vec<PerftCase<'_>>, OracleError> {
 /// A three-line delegate to [`Board::from_fen`], which is the point: before issue #4 this
 /// function was a second, independent FEN validator returning `Result<(), String>`, and
 /// D-0014 recorded that as a deferral — two parsers can drift, and a caller could not
-/// branch on why a FEN was rejected. There is now one parser (D-0022).
+/// branch on why a FEN was rejected. There is now one parser (D-0023).
 ///
 /// The four-field form is still accepted, because the published Kiwipete FEN is stored
 /// that way and D-0008 forbids changing it.

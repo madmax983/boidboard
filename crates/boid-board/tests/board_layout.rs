@@ -206,7 +206,7 @@ fn squares_are_lerf_numbered() {
     assert_eq!(Square::H8.to_string(), "h8");
 }
 
-/// The piece numbering D-0018 froze, checked at both ends and in the middle.
+/// The piece numbering D-0019 froze, checked at both ends and in the middle.
 #[test]
 fn pieces_are_numbered_kind_times_two_plus_colour() {
     for kind in PieceKind::ALL {

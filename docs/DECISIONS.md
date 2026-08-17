@@ -685,7 +685,71 @@ Consequences: The `repo-invariants` job enforces the tag's target the moment it 
 
 ---
 
-## D-0018 — The representation contract, frozen before any key is computed
+## D-0018 — The trainer is roadmap, and SAN/PGN are its phase-1 prerequisite
+
+Status:       Accepted
+Date:         2026-08-16
+
+Context:      The customer asked for an opening / tactics / theory trainer, describing it as
+  "not in engine territory" and "easy to build once we have all the movement/stuff built".
+  The first half is right; the second half is conditional, and the condition is not met by
+  the issues as written. A trainer's content is SAN inside PGN -- repertoires are PGN with
+  variations, published theory and puzzle solutions are SAN, Lichess studies export as PGN.
+  Issue #4 covers FEN and Zobrist; #5 and #6 cover generation and legality. **No issue
+  covers SAN or PGN at all.** Coordinate notation is not a substitute: no existing content
+  is written in it.
+
+  SAN also has a natural moment. Emitting it requires disambiguation and check/mate
+  suffixes, both of which are questions about the legal move list, so it sits directly on
+  top of #6 -- a small addition to a component whose correctness has just been established
+  against an external oracle, or a change to the move layer with the whole engine standing
+  on it. The same choice, six phases apart.
+
+Decision:     The trainer is accepted onto the roadmap as a later phase and designed in
+  `docs/TRAINER.md`. Its acceptance criteria are NOT in that document: they are in its
+  GitHub issues, because D-0002 forbids in-repo self-authored acceptance criteria until
+  perft is green, and issues are upstream of the repository.
+
+  SAN and PGN I/O are scoped as #19, a phase-1 issue landing after #6, rather than by
+  editing #4's or #6's acceptance criteria, which are the customer's. The trainer is #20.
+
+  Crate placement is recommended (`boid-train` -> `boid-board`, `boid-search`) and
+  deliberately not executed. The `repo-invariants` job asserts the workspace members are
+  exactly the seven crates issue #3 names and diffs the DAG against
+  `.github/expected-dep-edges.txt`; an eighth crate amends a CI-enforced invariant, which
+  is not a side effect of a feature request.
+
+  No trainer code is written now. The scheduler and session state machine are genuinely
+  move-agnostic and buildable today, but the boundary types -- how a card names a position,
+  how an attempt names a move -- are exactly the ones that would be guessed wrong, and
+  every other part touches them. This is the argument D-0010 made for `Evaluator` and
+  D-0014 made for perft divide, applied a third time.
+
+Rule:         The trainer must not carry its own move notation: SAN and PGN I/O belong in
+  `boid-board` and land in phase 1. No eighth workspace crate may be added without an entry
+  superseding this one.
+
+Evidence:     The prerequisite table in `docs/TRAINER.md`, checked against the full text of
+  all fifteen issues on 2026-08-16, not against their titles. "SAN" appears in none of them;
+  the move layer is coordinate-notation throughout (#5 and #7 both fix castling as `e1g1`).
+  "PGN" appears only in #7 and #10, both times as an artefact of the external arbiter --
+  fastchess's `8moves_v3.pgn` book and the match PGN a human reads -- never as something
+  boidboard parses or emits. Re-checkable with:
+      gh issue list --state all --limit 100 --json number,body \
+        | jq -r '.[] | select(.body | test("SAN|PGN")) | .number'
+
+Consequences: Phase 1 gains a small addition, proptest-able exactly as #4's AC1 is for FEN.
+  Note what it does NOT get: Stockfish speaks UCI coordinate notation and emits no SAN at
+  all, so the existing differential harness does not extend to it. SAN's oracle is a
+  published PGN corpus round-tripped byte-for-byte -- parse, play, re-emit, diff -- which is
+  the perft fixture's posture applied to notation and can likewise be committed before the
+  code that must satisfy it. The trainer, in return, gets to be the cheap part the customer
+  expects. Deferring SAN would not remove this work; it would move it under a load-bearing
+  engine.
+
+---
+
+## D-0019 — The representation contract, frozen before any key is computed
 
 Status:       Accepted
 Date:         2026-08-16
@@ -726,7 +790,7 @@ Consequences: Issue #5's magic tables and issue #6's hashed perft can assume the
 
 ---
 
-## D-0019 — En passant is stored as a FILE, and it is always set
+## D-0020 — En passant is stored as a FILE, and it is always set
 
 Status:       Accepted
 Date:         2026-08-16
@@ -772,7 +836,7 @@ Consequences: The Stockfish FEN oracle corroborates five of the six FEN fields. 
 
 ---
 
-## D-0020 — The accepted FEN language is canonical FEN plus one declared elision
+## D-0021 — The accepted FEN language is canonical FEN plus one declared elision
 
 Status:       Accepted
 Date:         2026-08-16
@@ -815,7 +879,7 @@ Consequences: AC1 is reported as satisfied under a declared narrowing, and the n
 
 ---
 
-## D-0021 — What `from_fen` deliberately does not enforce, and who owns each rule
+## D-0022 — What `from_fen` deliberately does not enforce, and who owns each rule
 
 Status:       Accepted
 Date:         2026-08-16
@@ -854,7 +918,7 @@ Consequences: Issue #5 inherits a written list of what it must add, and issue #6
 
 ---
 
-## D-0022 — `FenError` replaces `Result<(), String>`, and there is one parser
+## D-0023 — `FenError` replaces `Result<(), String>`, and there is one parser
 
 Status:       Accepted
 Date:         2026-08-16
@@ -870,7 +934,7 @@ Decision:     The deferral is closed. `fen::FenError` is a flat, `Copy`, scalar-
   repository holds ONE FEN parser rather than two that can drift.
 
   The delegation is only sound because the two callers want the same strictness. They do:
-  every rule in D-0021 is a rule a fixture row must also satisfy. The one property that
+  every rule in D-0022 is a rule a fixture row must also satisfy. The one property that
   must survive is the four-field form -- the fixture stores Kiwipete that way and D-0008
   forbids changing it.
 
@@ -886,7 +950,7 @@ Consequences: A single parser means a strictness change is a single edit with a 
 
 ---
 
-## D-0023 — The seam between issue #4 and issue #5, and the overlap this issue takes on
+## D-0024 — The seam between issue #4 and issue #5, and the overlap this issue takes on
 
 Status:       Accepted
 Date:         2026-08-16
@@ -934,7 +998,7 @@ Consequences: D-0014's second deferral closes: issue #6's `PerftEngine::divide` 
 
 ---
 
-## D-0024 — Zobrist keys: splitmix64, published constants, a hardcoded seed, no seed search
+## D-0025 — Zobrist keys: splitmix64, published constants, a hardcoded seed, no seed search
 
 Status:       Accepted
 Date:         2026-08-16
@@ -974,7 +1038,7 @@ Consequences: A bug repro from issue #6 quotes a key and the key means the same 
 
 ---
 
-## D-0025 — proptest is a dev-dependency, and the corpus is not a "legal position" corpus
+## D-0026 — proptest is a dev-dependency, and the corpus is not a "legal position" corpus
 
 Status:       Accepted
 Date:         2026-08-16
@@ -1027,7 +1091,7 @@ Consequences: `cargo test` pays a one-off compile for 18 crates. `cargo build` p
 
 ---
 
-## D-0026 — The position type is `Board`, and `apply_move` may not produce an unrepresentable one
+## D-0027 — The position type is `Board`, and `apply_move` may not produce an unrepresentable one
 
 Status:       Accepted
 Date:         2026-08-16
@@ -1056,7 +1120,7 @@ Consequences: Issue #5's move generator cannot produce a non-promoting pawn move
 
 ---
 
-## D-0027 — The measured register for issue #4
+## D-0028 — The measured register for issue #4
 
 Status:       Accepted
 Date:         2026-08-16
@@ -1113,7 +1177,7 @@ Consequences: Issue #5 inherits a written list of what it must add rather than a
 
 ---
 
-## D-0028 — Corrections found by the multi-angle review of issue #4
+## D-0029 — Corrections found by the multi-angle review of issue #4
 
 Status:       Accepted
 Date:         2026-08-17
@@ -1155,12 +1219,12 @@ Decision:     The corrections are recorded here rather than by editing history.
   A `repo-invariants` step now resolves every `file::test_name` cited in this log against
   the source, so a citation cannot silently rot again.
 
-  **D-0021's Rule was unsatisfied.** It requires that every rule `from_fen` deliberately
+  **D-0022's Rule was unsatisfied.** It requires that every rule `from_fen` deliberately
   does not enforce have a test asserting a violating FEN is accepted, and it cited
   `tests/fen_language.rs` -- which did not exist. `src/fen.rs`'s module doc cited it too.
   The file now exists and covers all seven unenforced rules.
 
-  **D-0024's const-evaluation argument was inverted.** It claims
+  **D-0025's const-evaluation argument was inverted.** It claims
   `const _TABLE_IS_CONST_EVALUATED` is what forces compile-time evaluation. Measured:
   deleting that item and making `build_table` non-`const` still fails to compile, because
   the `static ZOBRIST` initialiser is itself a const context. And keeping the item while
@@ -1182,7 +1246,7 @@ Consequences: Issue #5 inherits a decision log whose citations are mechanically 
 
 ---
 
-## D-0029 — The mailbox is `[Option<Piece>; 64]`, not the issue's literal `[u8; 64]`
+## D-0030 — The mailbox is `[Option<Piece>; 64]`, not the issue's literal `[u8; 64]`
 
 Status:       Accepted
 Date:         2026-08-17
@@ -1228,3 +1292,54 @@ Evidence:     `board_layout::the_option_piece_niche_costs_nothing` and
 
 Consequences: `Board::piece_at` returns `Option<Piece>` directly with no decoding step, and
   issue #5's move generation cannot construct an invalid mailbox byte.
+
+---
+
+## D-0031 — Issue #4's entries were renumbered on merge; commit messages cite the old numbers
+
+Status:       Accepted
+Date:         2026-08-17
+
+Context:      This log is append-only and its entries are immutable once merged. Issue #4's
+  branch was written against a log ending at D-0017 and took D-0018 through D-0029. While
+  it was open, PR #21 merged, taking **D-0018** for the trainer and SAN/PGN entry. Two
+  entries then claimed the same number, which is the one thing a numbered append-only log
+  cannot tolerate: every `Rule:` line in it is written to be quotable, and a quotation that
+  resolves to two different entries is worse than no quotation.
+
+Decision:     The merged entry keeps D-0018. Issue #4's twelve entries shift up by one:
+
+      was    now    subject
+      0018   0019   the frozen orderings
+      0019   0020   en passant is a file, and always set
+      0020   0021   the round-trip law
+      0021   0022   the strictness inventory
+      0022   0023   FenError, and one parser
+      0023   0024   the #4/#5 seam
+      0024   0025   splitmix64, and no seed search
+      0025   0026   proptest, and the corpus is not "legal"
+      0026   0027   Board, and apply-move representability
+      0027   0028   the measured register
+      0028   0029   the review's corrections
+      0029   0030   the mailbox narrowing
+
+  Renumbering unmerged entries is legitimate; renumbering a merged one is not, which is what
+  decides which side moves. Every reference in `crates/`, `scripts/` and `.github/` was
+  updated with them. `README.md` and `docs/TRAINER.md` were deliberately NOT updated: their
+  D-0018 references point at the trainer entry, which did not move.
+
+  **The commit messages on issue #4's branch cite the old numbers and were not rewritten.**
+  D-0004 settled that published history is not rewritten to make a record look tidier, and
+  the branch was pushed before the collision existed. A reader of those messages should add
+  one to any D-number from D-0018 to D-0029; below D-0018 the numbering is unchanged. This
+  entry is the mapping they need, and is the reason it is written down rather than left to
+  be inferred.
+
+Rule:         An unmerged branch holding decision entries must re-check its numbering
+  against `main` before merge, and renumber itself rather than the merged side.
+
+Evidence:     `grep -oE '^## D-[0-9]{4}' docs/DECISIONS.md` yields D-0001..D-0031 with no
+  gaps and no repeats; the `repo-invariants` citation check resolves every cited test.
+
+Consequences: The next branch to add entries starts at D-0032. The collision is cheap to
+  avoid and expensive to discover late, which is what the Rule above is for.

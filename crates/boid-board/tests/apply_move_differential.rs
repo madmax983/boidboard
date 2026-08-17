@@ -13,7 +13,7 @@
 //!
 //! Stockfish uses the **opposite en-passant convention**. It records the square only when
 //! an en-passant capture is actually available, and drops it otherwise; issue #4 mandates
-//! setting it after every double push regardless (D-0019). Measured here:
+//! setting it after every double push regardless (D-0020). Measured here:
 //!
 //! ```text
 //! position startpos moves e2e4   ->  Stockfish `d` prints "... b KQkq - 0 1"
@@ -184,7 +184,7 @@ fn applying_every_legal_root_move_agrees_with_stockfish() {
         }
     }
 
-    // Exact, not a floor: D-0027's register quotes this number, so it has to be pinned
+    // Exact, not a floor: D-0028's register quotes this number, so it has to be pinned
     // rather than bounded. A change here means the fixture or the move rules moved.
     assert_eq!(
         compared, 179,
@@ -248,7 +248,7 @@ fn the_en_passant_divergence_from_stockfish_is_the_declared_one() {
 
     assert!(
         ours.contains(" e3 "),
-        "this project records the en-passant file after every double push (D-0019): {ours}"
+        "this project records the en-passant file after every double push (D-0020): {ours}"
     );
     assert!(
         theirs.contains(" - "),

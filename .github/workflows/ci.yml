@@ -211,10 +211,10 @@ jobs:
           grep -A1 'name = "autumn-harvest"' Cargo.lock | grep -q 'version = "0.5.'
           echo "Cargo.lock is tracked and pins autumn-web 0.6.x / autumn-harvest 0.5.x"
 
-      - name: Zobrist table matches its independent Python derivation (D-0024)
+      - name: Zobrist table matches its independent Python derivation (D-0025)
         run: |
           set -euo pipefail
-          # scripts/zobrist-reference.py was written from docs/DECISIONS.md D-0018/D-0024,
+          # scripts/zobrist-reference.py was written from docs/DECISIONS.md D-0019/D-0025,
           # not from src/zobrist.rs, and its digest was computed BEFORE the Rust constant
           # was pinned. This step keeps the two derivations tied together.
           command -v python3 >/dev/null || { echo "python3 is required"; exit 1; }
@@ -227,7 +227,7 @@ jobs:
           echo "pinned: $pinned"
           [ "$derived" = "$pinned" ]
 
-      - name: No attack tables or move generation until issue #5 (D-0023)
+      - name: No attack tables or move generation until issue #5 (D-0024)
         run: |
           set -euo pipefail
           # The #4/#5 seam, mechanically. Move APPLICATION needs no attack tables; move
@@ -235,7 +235,7 @@ jobs:
           # appears before issue #5, the seam has moved and the decision log is stale.
           if git grep -nE 'fn +(attackers_to|is_square_attacked|is_check|generate_[a-z_]*moves)' \
                -- 'crates/*/src/*'; then
-            echo "D-0023 violated: attack or generation code landed before issue #5."
+            echo "D-0024 violated: attack or generation code landed before issue #5."
             exit 1
           fi
           echo "no attack tables or move generation present"
@@ -252,7 +252,7 @@ jobs:
           fi
           echo "no unmake_move present"
 
-      - name: Every test the decision log cites resolves to a test that exists (D-0028)
+      - name: Every test the decision log cites resolves to a test that exists (D-0029)
         run: |
           set -euo pipefail
           # Four Evidence citations in docs/DECISIONS.md named tests that did not exist --

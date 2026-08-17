@@ -5,7 +5,7 @@
 //! `from_fen` accepts canonical FEN with six fields, and the four-field abbreviation the
 //! published Kiwipete position is stored in (D-0008), which omits the halfmove clock and
 //! the fullmove number. `to_fen` always emits six fields, so the round trip obeys one law
-//! with no third case (D-0020):
+//! with no third case (D-0021):
 //!
 //! ```text
 //! to_fen(from_fen(f)) == f            when f has six fields
@@ -14,7 +14,7 @@
 //!
 //! # Strictness
 //!
-//! The parser is strict, and every rule it does *not* enforce is written down in D-0021
+//! The parser is strict, and every rule it does *not* enforce is written down in D-0022
 //! with an owner, plus a test in `tests/fen_language.rs` asserting that a FEN violating it
 //! is accepted. The largest deliberate omission is that a position with the side **not** to
 //! move already in check is accepted: deciding that needs attack tables, which are issue
@@ -71,7 +71,7 @@ impl fmt::Display for FenField {
 /// Flat, `Copy`, and scalar-payloaded: it replaces the `Result<(), String>` that
 /// `perft::oracle::validate_fen` used to return, which D-0014 recorded as wrong for a
 /// parser precisely because a caller could not branch on *why* a FEN was rejected
-/// (D-0022).
+/// (D-0023).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FenError {
     /// The FEN was empty.
@@ -356,7 +356,7 @@ impl Board {
         } else {
             // The four-field abbreviation D-0008 stores Kiwipete in. The defaults are the
             // values Stockfish itself supplies when fed the same four fields, so the
-            // expansion is corroborated rather than invented (D-0020).
+            // expansion is corroborated rather than invented (D-0021).
             (0, 1)
         };
 
@@ -368,7 +368,7 @@ impl Board {
     ///
     /// Always six fields, even for a board parsed from the four-field form: `Board` keeps
     /// no memory of its source text, because such a field would be compared by `PartialEq`
-    /// and copied on every `apply_move` (D-0020).
+    /// and copied on every `apply_move` (D-0021).
     #[must_use]
     pub fn to_fen(&self) -> String {
         let mut out = String::with_capacity(MAX_FEN_LEN);
@@ -541,7 +541,7 @@ fn parse_castling(board: &Board, field: &str) -> Result<CastlingRights, FenError
     Ok(rights)
 }
 
-/// Parse the en-passant field into the file the board stores (D-0019).
+/// Parse the en-passant field into the file the board stores (D-0020).
 fn parse_en_passant(board: &Board, field: &str, side: Color) -> Result<Option<File>, FenError> {
     if field == "-" {
         return Ok(None);

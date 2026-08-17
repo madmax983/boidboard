@@ -33,7 +33,7 @@ use support::sha256_hex;
 ///
 /// Produced by `scripts/zobrist-reference.py` **before** it was pinned here. If this test
 /// fails, the key table changed: that is not automatically wrong, but it must be
-/// deliberate, and D-0018 requires a superseding decision entry to change any of the four
+/// deliberate, and D-0019 requires a superseding decision entry to change any of the four
 /// orderings that feed it.
 const ZOBRIST_SHA256: &str = "31e98d78da31b5d7439ed0601a698f7ab6dc54499d3e0be77d3be645dee2a314";
 
@@ -158,7 +158,7 @@ fn the_keys_are_baked_into_the_executable_image() {
 ///
 /// Every runner this project has is x86-64, so a native-endian digest would agree with a
 /// big-endian one nowhere and disagree with it visibly nowhere either. This asserts the two
-/// serialisations genuinely differ, so the choice recorded in D-0018 is a choice and not a
+/// serialisations genuinely differ, so the choice recorded in D-0019 is a choice and not a
 /// coincidence.
 #[test]
 fn the_digest_serialisation_is_big_endian_and_that_matters() {

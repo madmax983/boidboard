@@ -22,7 +22,7 @@ fn err(text: &str) -> OracleError {
 /// Exists so that every FEN rejection below can name the rule it broke. Before issue #4
 /// these assertions all matched `MalformedFen { .. }`, and a probe proved what that was
 /// worth: collapsing every `FenError` variant to a single value broke **none** of them.
-/// D-0022 requires each to name its cause.
+/// D-0023 requires each to name its cause.
 fn fen_cause(e: &OracleError) -> FenError {
     match e {
         OracleError::MalformedFen { source, .. } => *source,

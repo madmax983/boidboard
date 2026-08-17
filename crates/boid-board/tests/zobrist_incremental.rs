@@ -6,7 +6,7 @@
 //! clause is behavioural and is asserted directly. The second has no black-box witness —
 //! every behavioural test it suggests passes under both 8 file keys and 64 square keys — so
 //! it is discharged three ways: structurally, because `Board` stores an en-passant **file**
-//! and no rank is representable (D-0019); by the key set having exactly 8 en-passant keys;
+//! and no rank is representable (D-0020); by the key set having exactly 8 en-passant keys;
 //! and by the operative reading below.
 //!
 //! The operative reading is that **the key ignores the halfmove clock and the fullmove
@@ -182,7 +182,7 @@ fn the_hashed_state_bits_produce_two_hundred_and_eighty_eight_distinct_contribut
     assert_eq!(seen.len(), 2 * 16 * 9);
 }
 
-/// D-0018 froze the ORDER of the castling and en-passant keys, and nothing pinned it.
+/// D-0019 froze the ORDER of the castling and en-passant keys, and nothing pinned it.
 ///
 /// Reversing either block is a bijection on the table: the digest is unchanged, every
 /// distinctness assertion still holds, and only an outside reader trying to reproduce a
@@ -192,7 +192,7 @@ fn the_hashed_state_bits_produce_two_hundred_and_eighty_eight_distinct_contribut
 fn the_castling_and_en_passant_keys_are_in_the_order_the_decision_log_froze() {
     let table = zobrist::table();
 
-    // D-0018: castling keys run WK, WQ, BK, BQ from CASTLING_INDEX.
+    // D-0019: castling keys run WK, WQ, BK, BQ from CASTLING_INDEX.
     for (offset, right) in [
         boid_board::CastlingRights::WHITE_KING,
         boid_board::CastlingRights::WHITE_QUEEN,
@@ -205,11 +205,11 @@ fn the_castling_and_en_passant_keys_are_in_the_order_the_decision_log_froze() {
         assert_eq!(
             zobrist::castling(right),
             table[zobrist::CASTLING_INDEX + offset],
-            "castling key {offset} is not the one D-0018 froze"
+            "castling key {offset} is not the one D-0019 froze"
         );
     }
 
-    // D-0018: en-passant keys run a..h from EN_PASSANT_INDEX.
+    // D-0019: en-passant keys run a..h from EN_PASSANT_INDEX.
     for index in 0..File::COUNT {
         let file = File::new(index as u8).expect("index is below 8");
         assert_eq!(

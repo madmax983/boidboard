@@ -97,7 +97,7 @@ type Plan = (bool, u8, Vec<(u8, u8)>, bool, u8, u16, u16, (u8, u8));
 /// decided without attack tables, which are issue #5's. Every position here is
 /// structurally valid and satisfies every rule the parser enforces — two kings, no
 /// back-rank pawns, castling rights only where the king and rook are home, an en-passant
-/// file only where a real double push could have left one — and D-0025 records the
+/// file only where a real double push could have left one — and D-0026 records the
 /// narrowing rather than letting "legal" pass unexamined.
 pub fn arbitrary_fen() -> impl Strategy<Value = String> {
     (

@@ -7,7 +7,7 @@
 //! **The fixture's Kiwipete row has four fields.** D-0008 stores the published FEN exactly
 //! as published, without the halfmove and fullmove counters, and forbids appending them.
 //! A canonical six-field emitter therefore cannot return its bytes. So the criterion is
-//! discharged as the *law* D-0020 states — for every FEN the parser accepts, emitting
+//! discharged as the *law* D-0021 states — for every FEN the parser accepts, emitting
 //! returns the input when it had six fields and the input plus `" 0 1"` when it had four,
 //! and there is no third case. That is a stronger claim than the criterion's, because it
 //! quantifies over the whole accepted language rather than over seven rows. The four-field
@@ -20,7 +20,7 @@
 //! valid, with two kings, no back-rank pawns, castling rights only where the king and rook
 //! are home, and an en-passant file only where a real double push could have left one.
 //! Calling them "legal" would be the kind of claim this project's decision log exists to
-//! stop, so D-0025 records the narrowing.
+//! stop, so D-0026 records the narrowing.
 //!
 //! The generator builds **text**, not boards. A corpus produced by calling `to_fen` would
 //! be by construction the set the parser accepts, and the round trip over it would prove

@@ -14,7 +14,7 @@
 //! for a `OnceLock` seeded from the operating system, which is the exact defect it appears
 //! to exclude.
 //!
-//! See `docs/DECISIONS.md` D-0018 (the frozen orderings) and D-0024 (the generator, the
+//! See `docs/DECISIONS.md` D-0019 (the frozen orderings) and D-0025 (the generator, the
 //! seed, and why no seed search was performed).
 
 use core::fmt;
@@ -26,7 +26,7 @@ use crate::board::{CastlingRights, File, Piece, Square};
 ///
 /// `0x626F_6964_626F_7264`. No seed was tried, measured and kept: a searched seed would
 /// make every structural claim about the key set a fitted result rather than a property of
-/// the generator (D-0024).
+/// the generator (D-0025).
 pub const ZOBRIST_SEED: u64 = u64::from_be_bytes(*b"boidbord");
 
 /// splitmix64's increment, `floor(2^64 / phi)`, from Vigna's published algorithm.
@@ -178,7 +178,7 @@ static ZOBRIST: [ZobristKey; KEY_COUNT] = build_table();
 
 /// Forces the table through compile-time evaluation.
 ///
-/// This item is the load-bearing half of "never from entropy" (D-0024). It is not a test
+/// This item is the load-bearing half of "never from entropy" (D-0025). It is not a test
 /// and cannot be skipped, filtered out, or run in a configuration that omits it: if
 /// `build_table` ever reached for a clock, a file, or an operating-system entropy source,
 /// **this line would stop compiling**.
@@ -186,7 +186,7 @@ const _TABLE_IS_CONST_EVALUATED: [ZobristKey; KEY_COUNT] = build_table();
 
 /// The key for `piece` standing on `square`.
 ///
-/// Index arithmetic is `piece * 64 + square`, never `square * 12 + piece` (D-0018).
+/// Index arithmetic is `piece * 64 + square`, never `square * 12 + piece` (D-0019).
 #[must_use]
 pub fn piece_square(piece: Piece, square: Square) -> ZobristKey {
     ZOBRIST[piece.index() * Square::COUNT + square.index()]
@@ -217,7 +217,7 @@ pub fn castling(rights: CastlingRights) -> ZobristKey {
 
 /// The key for the en-passant **file**, or zero when there is none.
 ///
-/// Eight keys, not sixty-four: the rank follows from the side to move (D-0019). Returning
+/// Eight keys, not sixty-four: the rank follows from the side to move (D-0020). Returning
 /// zero for `None` keeps the call site branchless without a ninth key existing — and
 /// because zero is the XOR identity, "no en-passant file" contributes nothing, which is
 /// the same thing the absent key would have meant.

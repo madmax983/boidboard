@@ -2,7 +2,7 @@
 """An independent derivation of boidboard's zobrist key table.
 
 This script exists to be a SECOND implementation, not a copy of the first. It was written
-from the specification in docs/DECISIONS.md D-0018 and D-0024 -- splitmix64 with Vigna's
+from the specification in docs/DECISIONS.md D-0019 and D-0025 -- splitmix64 with Vigna's
 published constants, seeded from the big-endian bytes of b"boidbord", 781 keys in the order
 piece-square / side-to-move / castling / en-passant-file, serialised big-endian -- and not
 from crates/boid-board/src/zobrist.rs.

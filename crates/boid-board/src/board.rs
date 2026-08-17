@@ -4,7 +4,7 @@
 //! and a `u64` bitboard's bit *n* is square *n*. Pieces are numbered `kind * 2 + colour`,
 //! which puts the two pawn kinds at indices 0 and 1 and therefore puts every pawn key in
 //! the contiguous prefix of the zobrist piece-square block — see `docs/DECISIONS.md`
-//! D-0018, which froze both orderings before the first key was computed.
+//! D-0019, which froze both orderings before the first key was computed.
 
 use core::fmt;
 
@@ -61,7 +61,7 @@ impl Color {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum PieceKind {
-    /// Pawn. Kind `0`, which is what makes the pawn keys a contiguous prefix (D-0018).
+    /// Pawn. Kind `0`, which is what makes the pawn keys a contiguous prefix (D-0019).
     Pawn = 0,
     /// Knight.
     Knight = 1,
@@ -111,7 +111,7 @@ impl PieceKind {
 
 /// A coloured piece.
 ///
-/// The discriminant is `kind * 2 + colour` (D-0018). It is the index into the zobrist
+/// The discriminant is `kind * 2 + colour` (D-0019). It is the index into the zobrist
 /// piece-square block, and it is the byte stored in the mailbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u8)]
@@ -199,7 +199,7 @@ impl Piece {
         self as usize
     }
 
-    /// This piece's colour. The low bit of the discriminant, by D-0018's ordering.
+    /// This piece's colour. The low bit of the discriminant, by D-0019's ordering.
     #[must_use]
     pub const fn color(self) -> Color {
         if (self as u8) & 1 == 0 {
@@ -209,7 +209,7 @@ impl Piece {
         }
     }
 
-    /// This piece's kind. The discriminant halved, by D-0018's ordering.
+    /// This piece's kind. The discriminant halved, by D-0019's ordering.
     #[must_use]
     pub const fn kind(self) -> PieceKind {
         PieceKind::ALL[(self as usize) >> 1]
@@ -218,7 +218,7 @@ impl Piece {
     /// Whether this is a pawn of either colour.
     ///
     /// One comparison rather than a match, because the pawns are indices 0 and 1 — the
-    /// property D-0018's piece ordering exists to buy.
+    /// property D-0019's piece ordering exists to buy.
     #[must_use]
     pub const fn is_pawn(self) -> bool {
         (self as u8) < 2
@@ -269,7 +269,7 @@ impl fmt::Display for Piece {
 ///
 /// A distinct type because the en-passant state is stored as a *file*, never a square:
 /// the rank follows from the side to move, so a rank is not representable and therefore
-/// cannot be wrong (D-0019).
+/// cannot be wrong (D-0020).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct File(u8);
 
@@ -409,7 +409,7 @@ impl fmt::Display for Square {
 /// The four castling rights, as a bitset.
 ///
 /// The bit order `WK, WQ, BK, BQ` is the order of the four zobrist castling keys and of
-/// the FEN `KQkq` field (D-0018).
+/// the FEN `KQkq` field (D-0019).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
 pub struct CastlingRights(u8);
 
@@ -427,7 +427,7 @@ impl CastlingRights {
     /// All four rights — the FEN `KQkq`.
     pub const ALL: Self = Self(0b1111);
 
-    /// The four rights individually, in D-0018's order.
+    /// The four rights individually, in D-0019's order.
     pub const EACH: [Self; 4] = [
         Self::WHITE_KING,
         Self::WHITE_QUEEN,
@@ -956,7 +956,7 @@ impl Board {
 
     /// The en-passant file, if a pawn just made a double push.
     ///
-    /// A file, not a square: the rank follows from the side to move (D-0019).
+    /// A file, not a square: the rank follows from the side to move (D-0020).
     #[must_use]
     pub const fn ep_file(&self) -> Option<File> {
         let nibble = (self.state >> EN_PASSANT_SHIFT) & 0b1111;
@@ -1230,7 +1230,7 @@ mod tests {
     //! suite stayed green — the guard was unfalsifiable, and so was every `BoardInvariant`
     //! variant.
     //!
-    //! D-0023 promises issue #5 that it can prove a corrupted board is detected by calling
+    //! D-0024 promises issue #5 that it can prove a corrupted board is detected by calling
     //! the public `check_invariants` rather than by a corruption hook inside `apply_move`.
     //! That promise needs these tests to be true.
 

@@ -1,4 +1,4 @@
-//! Cycle 2: the FEN parser accepts the language D-0020 defines and rejects everything else
+//! Cycle 2: the FEN parser accepts the language D-0021 defines and rejects everything else
 //! with a named reason.
 //!
 //! This is acceptance criterion 2. Its wording — "invalid FENs return `Err`, never panic" —
@@ -77,7 +77,7 @@ fn the_four_field_kiwipete_form_is_accepted_and_defaults_its_clocks() {
     assert_eq!(board.halfmove_clock(), 0);
     assert_eq!(board.fullmove_number(), 1);
     // The same position written out in full must produce an identical board, including
-    // both keys. This is what licenses D-0020's " 0 1" canonicalisation.
+    // both keys. This is what licenses D-0021's " 0 1" canonicalisation.
     assert_eq!(ok(&format!("{four} 0 1")), board);
 }
 

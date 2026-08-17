@@ -90,7 +90,7 @@ fn positions_equal_up_to_the_clocks_hash_alike() {
 /// **not** hash alike.
 ///
 /// 1.d4 Nf6 2.Nf3 and 1.Nf3 Nf6 2.d4 reach the same pieces, but the second leaves a pawn
-/// having just double-pushed, so its en-passant file is set and the first's is not. D-0019
+/// having just double-pushed, so its en-passant file is set and the first's is not. D-0020
 /// sets the file after every double push regardless of whether a capture is available, so
 /// a green equality here would mean the en-passant key is never XORed at all.
 #[test]

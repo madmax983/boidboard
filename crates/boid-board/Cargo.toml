@@ -19,7 +19,7 @@ authors.workspace      = true
 # (which filters to normal dependencies); only `cargo test` pays for it. Default features
 # are off: they pull rusty-fork, tempfile, rustix and wait-timeout for a fork-and-timeout
 # harness this crate does not use, and turning them off drops the transitive tree from 39
-# crates to 18. See D-0025.
+# crates to 18. See D-0026.
 [dev-dependencies]
 proptest = { version = "1.11", default-features = false, features = ["std", "bit-set"] }
 

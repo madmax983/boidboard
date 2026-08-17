@@ -358,7 +358,7 @@ fn a_castle_flagged_move_must_be_a_king_on_its_castling_pair() {
 }
 
 /// Found by review: capturing a king was accepted, producing a board `from_fen` rejects —
-/// which is D-0026's rule.
+/// which is D-0027's rule.
 #[test]
 fn capturing_a_king_is_rejected() {
     let position = board("4k3/8/8/8/8/8/8/4K2R w K - 0 1");

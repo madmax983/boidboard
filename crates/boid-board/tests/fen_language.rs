@@ -1,6 +1,6 @@
 //! What `Board::from_fen` deliberately does **not** enforce.
 //!
-//! D-0021's binding rule: *"Every rule `from_fen` deliberately does not enforce must have a
+//! D-0022's binding rule: *"Every rule `from_fen` deliberately does not enforce must have a
 //! test asserting that a FEN violating it is accepted, so that the boundary is a choice on
 //! record rather than an omission."*
 //!
@@ -17,7 +17,7 @@ use boid_board::{Color, PieceKind};
 
 fn accepted(fen: &str) -> Board {
     let board = Board::from_fen(fen).unwrap_or_else(|e| {
-        panic!("{fen:?} must be ACCEPTED — D-0021 records this rule as unenforced: {e}")
+        panic!("{fen:?} must be ACCEPTED — D-0022 records this rule as unenforced: {e}")
     });
     board
         .check_invariants()
@@ -34,7 +34,7 @@ fn accepted(fen: &str) -> Board {
 /// **Not enforced: the side not to move must not already be in check.** Owner: issue #5.
 ///
 /// Deciding this needs to know which squares are attacked, which needs the attack tables
-/// D-0023 places in issue #5. Black is to move here while White's king stands in check from
+/// D-0024 places in issue #5. Black is to move here while White's king stands in check from
 /// the black rook — a position that cannot arise in a real game.
 #[test]
 fn a_position_with_the_side_not_to_move_in_check_is_accepted() {
@@ -101,7 +101,7 @@ fn a_halfmove_clock_past_the_fifty_move_limit_is_accepted() {
 /// **Not enforced: an en-passant square is only recorded when a capture is available.**
 /// Owner: issue #8, and deliberately so.
 ///
-/// This is the convention divergence D-0019 records. Stockfish drops a dead en-passant
+/// This is the convention divergence D-0020 records. Stockfish drops a dead en-passant
 /// square; issue #4 mandates keeping it. The rule is *implementable* here — it needs only
 /// pawn-attack knowledge, which is a 64-entry table — and is deliberately not implemented,
 /// because the issue mandates the other convention and it is the conservative one for
@@ -144,7 +144,7 @@ fn shredder_castling_notation_is_rejected_by_name() {
     accepted("bqnbnrkr/pppppppp/8/8/8/8/PPPPPPPP/BQNBNRKR w - - 0 1");
 }
 
-/// Every rule in D-0021's "deliberately does not enforce" list has a test above.
+/// Every rule in D-0022's "deliberately does not enforce" list has a test above.
 ///
 /// A count, so that adding a rule to the decision log without adding a test here is a
 /// failure rather than a silent divergence.
@@ -162,6 +162,6 @@ fn every_unenforced_rule_in_the_decision_log_has_a_test() {
     assert_eq!(
         UNENFORCED_RULES.len(),
         7,
-        "D-0021 lists seven unenforced rules and this file tests each of them"
+        "D-0022 lists seven unenforced rules and this file tests each of them"
     );
 }

@@ -2,7 +2,7 @@
 //!
 //! # Scope
 //!
-//! This module is the boundary between issue #4 and issue #5, and D-0023 states it in one
+//! This module is the boundary between issue #4 and issue #5, and D-0024 states it in one
 //! sentence: **move application needs no attack tables; move generation and legality need
 //! nothing else.** So `Move` and [`Board::apply_move`] live here, and there is no attack
 //! table, no `attackers_to`, no check detection and no move generation anywhere in this
@@ -38,7 +38,7 @@ use crate::board::{Board, CastlingRights, Color, File, Piece, PieceKind, Square}
 pub enum MoveKind {
     /// A move to an empty square that is none of the below.
     Quiet,
-    /// A pawn's two-square advance. Sets the en-passant file (D-0019).
+    /// A pawn's two-square advance. Sets the en-passant file (D-0020).
     DoublePawnPush,
     /// King-side castling, `e1g1` or `e8g8`.
     KingCastle,
@@ -99,7 +99,7 @@ impl core::error::Error for MoveParseError {}
 
 /// Why a move could not be applied to a position.
 ///
-/// Structural only. None of these says anything about check — see D-0023.
+/// Structural only. None of these says anything about check — see D-0024.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MoveNotApplicable {
     /// No piece stands on the origin square.
@@ -508,7 +508,7 @@ impl Board {
         }
 
         // 5. A double push sets the en-passant file, whether or not a capture is available
-        //    (D-0019). Every other move clears it.
+        //    (D-0020). Every other move clears it.
         let ep = match mv.kind() {
             MoveKind::DoublePawnPush => Some(double_push_file(mv.to())),
             _ => None,
@@ -540,7 +540,7 @@ impl Board {
 
     /// Apply a move after checking its structural preconditions.
     ///
-    /// "Structural" is the operative word, and D-0023 fixes its meaning: this checks that
+    /// "Structural" is the operative word, and D-0024 fixes its meaning: this checks that
     /// the move describes something the *position* supports — a piece of the right colour
     /// on `from`, a destination that is not our own piece, a castling right that exists, an
     /// en-passant destination that is the board's en-passant square. It does **not** check
@@ -564,8 +564,8 @@ impl Board {
         }
         // A king is never captured in chess, and a board missing one is not
         // FEN-representable, so allowing it would let apply_move build a position from_fen
-        // rejects -- D-0026's rule. This is a structural fact about the RESULT, so it needs
-        // no attack table and stays inside D-0023's seam.
+        // rejects -- D-0027's rule. This is a structural fact about the RESULT, so it needs
+        // no attack table and stays inside D-0024's seam.
         if destination.is_some_and(|p| p.kind() == PieceKind::King) {
             return Err(MoveNotApplicable::CapturesAKing);
         }
