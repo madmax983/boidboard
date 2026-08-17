@@ -12,5 +12,14 @@ authors.workspace      = true
 # workspace and it should compile in well under a second, forever. See D-0014.
 [dependencies]
 
+# The one dev-dependency, named by issue #4's AC1 (D-0026). Dev-dependencies do not
+# propagate to dependents and `cargo build --workspace` compiles none of this, so the
+# zero-dependency stance above is narrowed rather than broken. default-features = false
+# drops `fork` and `timeout`, which re-exec the test binary -- unwanted next to this
+# crate's own two-process determinism check -- and are unnecessary for a crate that
+# denies unsafe code and so has no segfaults to survive.
+[dev-dependencies]
+proptest = { version = "1.11.0", default-features = false, features = ["std", "bit-set"] }
+
 [lints]
 workspace = true

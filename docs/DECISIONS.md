@@ -1079,3 +1079,56 @@ Evidence:     `fen_roundtrip::kiwipete_round_trips_in_its_published_four_field_f
 Consequences: Issue #19's PGN writer gets `write_fen`, which takes the layout as a
   parameter and writes into a caller-owned buffer, rather than a `Board` that remembers how
   it was spelled.
+
+---
+
+## D-0026 — proptest is `boid-board`'s first dev-dependency, and the zero-dependency stance is now enforced
+
+Status:       Accepted
+Date:         2026-08-17
+
+Context:      D-0014 records that `boid-board` takes no external dependencies deliberately,
+  and that this repository hand-rolled SHA-256 in a test rather than take one. Issue #4's AC1
+  names proptest explicitly: "200 randomly generated legal positions (proptest)".
+
+Decision:     `proptest = { version = "1.11.0", default-features = false, features =
+  ["std", "bit-set"] }` under `[dev-dependencies]`, adding five entries to `Cargo.lock`
+  (432 -> 437, measured).
+
+  This NARROWS D-0014 rather than breaking it. A dev-dependency does not propagate to
+  dependents, and `cargo build --workspace` -- AC1 command 1 of 3 from issue #3 -- compiles
+  none of it. Shipping a hand-rolled substitute for a tool the customer named by name would
+  be grading ourselves against a criterion we had rewritten, which is exactly what D-0002
+  exists to prevent.
+
+  `fork` and `timeout` are off. Both re-execute the test binary, which is unwanted next to
+  this crate's own two-process determinism check, and `catch_unwind` -- the part that
+  matters for shrinking a panic -- is gated on `std`, not on `fork`. A crate that denies
+  unsafe code has no segfaults to survive.
+
+  The 200-position corpus AC1 asks for is driven by this crate's own splitmix64 from a
+  hardcoded seed rather than by proptest's value stream, for the reason issue #4 gives about
+  the zobrist keys: a reproducible corpus means a reproducible failure. proptest is used for
+  what it is better at, which is shrinking adversarial input for AC2.
+
+  Discovered while checking this: the `repo-invariants` dependency-DAG diff filters
+  `.path != null`, so it has only ever seen INTRA-workspace edges. The zero-dependency
+  stance that `README.md` and `crates/boid-board/Cargo.toml` both assert has never been
+  enforced by anything. A `cargo metadata` step now enforces it, with a positive control in
+  the same step so that an empty result cannot mean "the query broke".
+
+Rule:         `boid-board` has no `kind == null` dependencies, enforced by CI.
+  `proptest-regressions/` is committed and must never be added to `.gitignore`: a
+  counterexample that CI finds and then discards is precisely the shape
+  `scripts/anti-theatre.sh` exists to punish. AC1's case count is asserted inside the test,
+  not configured in a `ProptestConfig` field -- a number in a config is a setting, and
+  D-0016 requires a numeric claim to be asserted.
+
+Evidence:     `cargo metadata` reports no non-dev dependencies for `boid-board`;
+  `Cargo.lock` grew by exactly five entries; `gitignore_anchoring::
+  gitignore_does_not_ignore_proptest_regressions`;
+  `fen_proptest::two_hundred_generated_positions_round_trip` asserts the corpus length.
+
+Consequences: The nightly cold-cache job pays proptest's full compile every night. That is
+  single-digit seconds beside a 23-billion-node perft replay, and the per-push AC1 path pays
+  nothing at all.

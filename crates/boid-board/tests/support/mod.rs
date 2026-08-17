@@ -7,4 +7,6 @@
 //! the lint for a whole test binary rather than for one module a given consumer only
 //! partly uses.
 
+pub mod naive_attacks;
+pub mod positions;
 pub mod sha256;

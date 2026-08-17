@@ -145,6 +145,32 @@ jobs:
             exit 1
           fi
 
+      - name: boid-board has no non-dev dependencies (D-0014, D-0026)
+        run: |
+          set -euo pipefail
+          # The dependency-DAG diff above filters on `.path != null`, so it has never had
+          # anything to say about EXTERNAL dependencies -- which means the zero-dependency
+          # stance README.md and the manifest both assert was, until now, unenforced.
+          # A dev-dependency is allowed and is `kind == "dev"`; a normal one is `kind == null`.
+          normal=$(cargo metadata --no-deps --format-version 1 | jq -r '
+            .packages[] | select(.name == "boid-board")
+            | .dependencies[] | select(.kind == null) | .name
+          ')
+          if [ -n "$normal" ]; then
+            echo "boid-board gained a non-dev dependency, which D-0014 forbids:"
+            echo "$normal"
+            exit 1
+          fi
+          # Positive control: the check must be able to see dependencies at all, or an
+          # empty result would mean "query broken" rather than "none found".
+          dev=$(cargo metadata --no-deps --format-version 1 | jq -r '
+            .packages[] | select(.name == "boid-board")
+            | .dependencies[] | select(.kind == "dev") | .name
+          ')
+          echo "dev-dependencies: $dev"
+          echo "$dev" | grep -qx proptest
+          echo "boid-board has no non-dev dependencies"
+
       - name: No .rs files under the repository-root tests/ directory (D-0007)
         run: |
           set -euo pipefail
