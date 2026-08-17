@@ -75,3 +75,29 @@ fn gitignore_does_not_ignore_the_perft_oracle() {
         );
     }
 }
+
+#[test]
+fn gitignore_does_not_ignore_proptest_regressions() {
+    // A counterexample proptest finds is a fact about this engine. Ignoring the file it is
+    // written to means CI can discover a bug, discard the input that provoked it, and pass
+    // on the next run -- which is precisely the shape `scripts/anti-theatre.sh` exists to
+    // punish (D-0026).
+    let lines: Vec<&str> = GITIGNORE
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+
+    for forbidden in [
+        "proptest-regressions",
+        "proptest-regressions/",
+        "**/proptest-regressions",
+        "*.txt",
+    ] {
+        assert!(
+            !lines.contains(&forbidden),
+            "`.gitignore` contains {forbidden:?}, which would throw away the input that \
+             reproduced a failure"
+        );
+    }
+}

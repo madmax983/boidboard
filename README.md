@@ -84,7 +84,7 @@ BOID_PERFT_MAX_NODES=200000000 cargo test --workspace -- --nocapture
 
 | Crate | Phase | Purpose |
 |---|---|---|
-| `boid-board` | 1 | Board representation, move generation, the perft oracle. No dependencies. |
+| `boid-board` | 1 | Board representation, move generation, the perft oracle. No non-dev dependencies; `proptest` is a dev-dependency, named by issue #4 (D-0026). |
 | `boid-search` | 2–3 | PVS, move ordering, LMR. Generic over the evaluator. |
 | `boid-eval-classical` | 4 | Conventional evaluation — the control arm and Elo anchor. |
 | `boid-eval-boids` | 5–6 | The boids force-field evaluation — the experiment. |

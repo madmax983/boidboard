@@ -145,6 +145,32 @@ jobs:
             exit 1
           fi
 
+      - name: boid-board has no non-dev dependencies (D-0014, D-0026)
+        run: |
+          set -euo pipefail
+          # The dependency-DAG diff above filters on `.path != null`, so it has never had
+          # anything to say about EXTERNAL dependencies -- which means the zero-dependency
+          # stance README.md and the manifest both assert was, until now, unenforced.
+          # A dev-dependency is allowed and is `kind == "dev"`; a normal one is `kind == null`.
+          normal=$(cargo metadata --no-deps --format-version 1 | jq -r '
+            .packages[] | select(.name == "boid-board")
+            | .dependencies[] | select(.kind == null) | .name
+          ')
+          if [ -n "$normal" ]; then
+            echo "boid-board gained a non-dev dependency, which D-0014 forbids:"
+            echo "$normal"
+            exit 1
+          fi
+          # Positive control: the check must be able to see dependencies at all, or an
+          # empty result would mean "query broken" rather than "none found".
+          dev=$(cargo metadata --no-deps --format-version 1 | jq -r '
+            .packages[] | select(.name == "boid-board")
+            | .dependencies[] | select(.kind == "dev") | .name
+          ')
+          echo "dev-dependencies: $dev"
+          echo "$dev" | grep -qx proptest
+          echo "boid-board has no non-dev dependencies"
+
       - name: No .rs files under the repository-root tests/ directory (D-0007)
         run: |
           set -euo pipefail
@@ -210,6 +236,48 @@ jobs:
           grep -A1 'name = "autumn-web"'     Cargo.lock | grep -q 'version = "0.6.'
           grep -A1 'name = "autumn-harvest"' Cargo.lock | grep -q 'version = "0.5.'
           echo "Cargo.lock is tracked and pins autumn-web 0.6.x / autumn-harvest 0.5.x"
+
+      - name: No undo affordance on the board value type (issue #4 AC7, D-0027)
+        run: |
+          set -euo pipefail
+          # AC7 asks that `Board` derives Copy and that there is NO `unmake_move` in the
+          # public API. The Copy half is a compile-time assertion in board_layout.rs. The
+          # absence half cannot be a cargo test -- no test can observe that a function is
+          # not there -- so it is a shell step, which is also D-0007's argument for keeping
+          # git-dependent checks out of the test suite.
+          #
+          # The synonym set matters more than the identifier: satisfying AC7 by renaming
+          # `unmake_move` to `undo` would satisfy the letter and none of the intent.
+          #
+          # The pathspec is mandatory: docs/TRAINER.md contains the literal `unmake_move`
+          # as prose, and this step is about code.
+          pattern='fn +(unmake_move|unmake|undo_move|undo|take_?back|revert|restore_(state|position|board))\b'
+          if git grep -nE "$pattern" -- '*.rs'; then
+            echo "AC7 violated: the board carries an undo affordance."
+            echo "A Copy board with no undo stack is the point (D-0027): repetition and"
+            echo "fifty-move detection are issue #8's, via a separately threaded zobrist"
+            echo "history, not via an unmake on the value type."
+            exit 1
+          fi
+          # Positive control, in the same step and with the same invocation shape: an
+          # absence check that cannot find anything proves nothing.
+          test "$(git grep -cE 'fn +from_fen\b' -- '*.rs' | wc -l)" -gt 0
+          echo "no undo affordance; the grep itself is working"
+
+      - name: Zobrist keys come from the seed, never from entropy (D-0020)
+        run: |
+          set -euo pipefail
+          # The issue's words are "never from entropy". These are the ways it would get in.
+          if grep -nE 'SystemTime|Instant::now|from_entropy|thread_rng|getrandom|/dev/u?random|env!\("|include_str!' \
+               crates/boid-board/src/zobrist.rs; then
+            echo "src/zobrist.rs reads something other than its hardcoded seed."
+            exit 1
+          fi
+          # A build script is the other route: it runs at compile time and can read anything.
+          test ! -f crates/boid-board/build.rs
+          # Positive control: the seed is where the keys actually come from.
+          grep -q '^const SEED: u64 = 0x626F_6964_626F_6172;' crates/boid-board/src/zobrist.rs
+          echo "zobrist keys derive from the committed seed alone"
 
       - name: Anti-theatre scan
         run: ./scripts/anti-theatre.sh

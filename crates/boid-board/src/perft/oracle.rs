@@ -10,6 +10,9 @@
 use std::error::Error;
 use std::fmt;
 
+use crate::fen::{ClockField, FenError, FenField};
+use crate::types::{CastlingRight, Colour};
+
 /// The perft oracle fixture, embedded at compile time.
 ///
 /// Declared exactly once in the workspace. A missing or renamed fixture is a **compile
@@ -164,8 +167,9 @@ pub enum OracleError {
     MalformedFen {
         /// 1-based line number in the fixture.
         line: usize,
-        /// What was wrong with it.
-        reason: String,
+        /// What was wrong with it. A typed [`FenError`] since issue #4 discharged D-0014's
+        /// deferral: a caller that wants to branch on *why* a FEN was rejected now can.
+        reason: FenError,
     },
     /// A position carried no depth data at all.
     NoCounts {
@@ -244,7 +248,15 @@ impl fmt::Display for OracleError {
     }
 }
 
-impl Error for OracleError {}
+impl Error for OracleError {
+    /// The underlying [`FenError`], for a caller walking the chain.
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::MalformedFen { reason, .. } => Some(reason),
+            _ => None,
+        }
+    }
+}
 
 /// Parse the oracle fixture into one [`PerftCase`] per position, in file order.
 ///
@@ -363,7 +375,10 @@ pub fn parse(text: &str) -> Result<Vec<PerftCase<'_>>, OracleError> {
 ///
 /// # Errors
 ///
-/// Returns a human-readable reason. The caller attaches the line number.
+/// Returns a [`FenError`], which the caller wraps with the line number. Typed since issue
+/// #4 discharged D-0014's deferral -- as a fixture validator this only ever needed a
+/// message, but the same vocabulary is what `Board::from_fen` speaks, and one vocabulary
+/// with two implementations is what makes the two checkable against each other.
 ///
 /// # Examples
 ///
@@ -381,127 +396,154 @@ pub fn parse(text: &str) -> Result<Vec<PerftCase<'_>>, OracleError> {
 /// // A board needs exactly one king per side.
 /// assert!(validate_fen("8/8/8/8/8/8/8/4K3 w - - 0 1").is_err());
 /// ```
-pub fn validate_fen(fen: &str) -> Result<(), String> {
+pub fn validate_fen(fen: &str) -> Result<(), FenError> {
     let fields: Vec<&str> = fen.split(' ').collect();
     if fields.len() != 4 && fields.len() != 6 {
-        return Err(format!(
-            "expected 4 or 6 space-separated fields, found {}: {fen:?}",
-            fields.len()
-        ));
+        return Err(FenError::FieldCount {
+            found: fields.len(),
+        });
     }
 
     // --- 1. piece placement ---
-    let ranks: Vec<&str> = fields[0].split('/').collect();
+    let placement = fields.first().copied().unwrap_or_default();
+    let ranks: Vec<&str> = placement.split('/').collect();
     if ranks.len() != 8 {
-        return Err(format!(
-            "piece placement must have 8 ranks, found {}",
-            ranks.len()
-        ));
+        return Err(FenError::RankCount { found: ranks.len() });
     }
-    let (mut white_kings, mut black_kings) = (0u32, 0u32);
+    let (mut white_kings, mut black_kings) = (0u8, 0u8);
     for (i, rank) in ranks.iter().enumerate() {
-        let mut files = 0u32;
+        let rank_number = 8u8.saturating_sub(u8::try_from(i).unwrap_or(u8::MAX));
+        let mut files = 0u8;
         let mut previous_was_digit = false;
         for ch in rank.chars() {
             if ch.is_ascii_digit() {
+                if !('1'..='8').contains(&ch) {
+                    return Err(FenError::DigitOutOfRange {
+                        rank: rank_number,
+                        ch,
+                    });
+                }
                 if previous_was_digit {
-                    return Err(format!(
-                        "rank {} uses consecutive digits, which is not canonical FEN: {rank:?}",
-                        8 - i
-                    ));
+                    return Err(FenError::ConsecutiveDigits { rank: rank_number });
                 }
                 previous_was_digit = true;
             } else {
                 previous_was_digit = false;
             }
             match ch {
-                '1'..='8' => files += ch as u32 - '0' as u32,
+                '1'..='8' => {
+                    files = files
+                        .saturating_add(u8::try_from(ch as u32 - '0' as u32).unwrap_or(u8::MAX));
+                }
                 'K' => {
-                    white_kings += 1;
-                    files += 1;
+                    white_kings = white_kings.saturating_add(1);
+                    files = files.saturating_add(1);
                 }
                 'k' => {
-                    black_kings += 1;
-                    files += 1;
+                    black_kings = black_kings.saturating_add(1);
+                    files = files.saturating_add(1);
                 }
-                'p' | 'n' | 'b' | 'r' | 'q' | 'P' | 'N' | 'B' | 'R' | 'Q' => files += 1,
+                'p' | 'n' | 'b' | 'r' | 'q' | 'P' | 'N' | 'B' | 'R' | 'Q' => {
+                    files = files.saturating_add(1);
+                }
                 _ => {
-                    return Err(format!("rank {} contains invalid character {ch:?}", 8 - i));
+                    return Err(FenError::PieceChar {
+                        rank: rank_number,
+                        ch,
+                    });
                 }
             }
         }
         if files != 8 {
-            return Err(format!(
-                "rank {} describes {files} files, not 8: {rank:?}",
-                8 - i
-            ));
+            return Err(FenError::RankWidth {
+                rank: rank_number,
+                files,
+            });
         }
     }
-    if white_kings != 1 || black_kings != 1 {
-        return Err(format!(
-            "expected exactly one king per side, found {white_kings} white and {black_kings} black"
-        ));
+    for (side, found) in [(Colour::White, white_kings), (Colour::Black, black_kings)] {
+        if found != 1 {
+            return Err(FenError::KingCount { side, found });
+        }
     }
 
     // --- 2. side to move ---
-    if fields[1] != "w" && fields[1] != "b" {
-        return Err(format!(
-            "side to move must be 'w' or 'b', found {:?}",
-            fields[1]
-        ));
-    }
+    let side_field = fields.get(1).copied().unwrap_or_default();
+    let side_to_move = match side_field.chars().next() {
+        Some(ch) if side_field.chars().count() == 1 => {
+            Colour::from_char(ch).ok_or(FenError::SideToMove { found: Some(ch) })?
+        }
+        found => return Err(FenError::SideToMove { found }),
+    };
 
     // --- 3. castling availability ---
-    let castling = fields[2];
+    let castling = fields.get(2).copied().unwrap_or_default();
     if castling != "-" {
         if castling.is_empty() {
-            return Err("castling field is empty; use '-' for none".to_owned());
+            return Err(FenError::EmptyField {
+                field: FenField::Castling,
+            });
         }
         let mut seen = String::new();
         for ch in castling.chars() {
-            if !"KQkq".contains(ch) {
-                return Err(format!("castling field contains invalid character {ch:?}"));
+            if CastlingRight::from_char(ch).is_none() {
+                if ch.is_ascii_alphabetic() && matches!(ch.to_ascii_lowercase(), 'a'..='h') {
+                    return Err(FenError::CastlingShredderNotation { ch });
+                }
+                return Err(FenError::CastlingChar { ch });
             }
             if seen.contains(ch) {
-                return Err(format!("castling field repeats {ch:?}"));
+                return Err(FenError::CastlingDuplicate { ch });
             }
             seen.push(ch);
         }
     }
 
     // --- 4. en passant target ---
-    let ep = fields[3];
+    let ep = fields.get(3).copied().unwrap_or_default();
     if ep != "-" {
-        let bytes = ep.as_bytes();
-        let ok = bytes.len() == 2
-            && (b'a'..=b'h').contains(&bytes[0])
-            && (bytes[1] == b'3' || bytes[1] == b'6');
-        if !ok {
-            return Err(format!(
-                "en passant target must be '-' or a square on rank 3 or 6, found {ep:?}"
-            ));
+        let mut chars = ep.chars();
+        let (Some(file), Some(rank), None) = (chars.next(), chars.next(), chars.next()) else {
+            return Err(FenError::EnPassantSyntax {
+                len: ep.chars().count(),
+            });
+        };
+        if !('a'..='h').contains(&file) || (rank != '3' && rank != '6') {
+            return Err(FenError::EnPassantSquare { file, rank });
         }
         // The rank follows from the side to move: after white pushes a pawn two squares
         // the target is on rank 3 and it is black's turn, and vice versa. A contradiction
         // here is decidable without a board, so it is caught here rather than in #4.
-        let expected_rank = if fields[1] == "w" { b'6' } else { b'3' };
-        if bytes[1] != expected_rank {
-            return Err(format!(
-                "en passant target {ep:?} contradicts the side to move ({}): expected rank {}",
-                fields[1],
-                char::from(expected_rank)
-            ));
+        let expected_rank = match side_to_move {
+            Colour::White => '6',
+            Colour::Black => '3',
+        };
+        if rank != expected_rank {
+            return Err(FenError::EnPassantRankContradictsSideToMove { rank, side_to_move });
         }
     }
 
     // --- 5, 6. halfmove clock and fullmove number, when present ---
     if fields.len() == 6 {
-        for (name, value) in [
-            ("halfmove clock", fields[4]),
-            ("fullmove number", fields[5]),
+        for (which, value) in [
+            (
+                ClockField::Halfmove,
+                fields.get(4).copied().unwrap_or_default(),
+            ),
+            (
+                ClockField::Fullmove,
+                fields.get(5).copied().unwrap_or_default(),
+            ),
         ] {
-            if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
-                return Err(format!("{name} must be a decimal number, found {value:?}"));
+            match value.chars().find(|ch| !ch.is_ascii_digit()) {
+                Some(ch) => return Err(FenError::ClockNotANumber { field: which, ch }),
+                None if value.is_empty() => {
+                    return Err(FenError::ClockNotANumber {
+                        field: which,
+                        ch: ' ',
+                    });
+                }
+                None => {}
             }
         }
     }
