@@ -23,6 +23,7 @@ use proptest::prelude::*;
 mod support;
 use support::naive_attacks::{is_in_check, is_square_attacked};
 use support::positions::{CORPUS_SIZE, corpus, corpus_attempts};
+use support::sha256::sha256_hex;
 
 #[test]
 fn two_hundred_generated_positions_round_trip() {
@@ -139,19 +140,27 @@ fn the_corpus_is_diverse_enough_to_mean_something() {
         }
     }
 
+    // Measured, then pinned. Floors rather than exact values, except where an exact value
+    // is the point: a floor that is never approached is not a guard, and these were chosen
+    // just under what the corpus actually produces (89/111 sides, 13 ep positions, 10
+    // (file, side) pairs, 15 of 16 castling masks, 687 of 768 piece-squares).
     assert!(white_to_move >= 60, "white to move in {white_to_move}");
     assert!(black_to_move >= 60, "black to move in {black_to_move}");
     assert!(
         with_ep >= 10,
         "only {with_ep} positions record an ep square"
     );
+    // Ten of the sixteen (file, side) pairs. Full sixteen-way coverage is not the corpus's
+    // job — `fen_roundtrip::en_passant_targets_for_both_colours` enumerates all of them
+    // explicitly — but a corpus with NO en-passant positions would leave AC1 with zero
+    // en-passant coverage, since all seven fixture FENs record "-".
     assert!(
-        ep_files.len() >= 8,
+        ep_files.len() >= 10,
         "en-passant coverage is {} (file, side) pairs",
         ep_files.len()
     );
     assert!(
-        castling_masks.len() >= 8,
+        castling_masks.len() >= 12,
         "only {} distinct castling masks",
         castling_masks.len()
     );
@@ -381,4 +390,42 @@ fn castling_rights_in_the_corpus_are_backed_by_their_pieces() {
             );
         }
     }
+}
+
+/// SHA-256 of the 200 corpus positions, each emitted as a six-field FEN and joined with a
+/// newline.
+///
+/// Measured once, then pinned, in the same posture `ORACLE_SHA256` takes towards the perft
+/// fixture. The corpus is a pure function of one hardcoded seed, so this cannot drift on its
+/// own — and it is driven by this crate's own splitmix64 rather than by proptest's value
+/// stream, so a proptest patch release cannot move it either.
+///
+/// If this fails, the generator changed. That is not automatically wrong, but the diversity
+/// assertions above are the reason to look: a narrowing generator still satisfies AC1's
+/// wording while proving much less.
+const CORPUS_SHA256: &str = "33a79e35debe6bd36b9f55778b2caa8266a37047867e7f69dbe0f62a0a12b0f0";
+
+#[test]
+fn corpus_fingerprint_is_pinned() {
+    let joined = corpus()
+        .iter()
+        .map(Board::to_fen)
+        .collect::<Vec<String>>()
+        .join("\n");
+
+    assert_eq!(
+        sha256_hex(joined.as_bytes()),
+        CORPUS_SHA256,
+        "the generated corpus changed"
+    );
+}
+
+#[test]
+fn the_corpus_is_stable_across_calls() {
+    // `corpus()` regenerates from the seed on every call, and several tests call it. If it
+    // were not a pure function of that seed, those tests would be testing different things
+    // and the fingerprint above would be meaningless.
+    let first = corpus();
+    let second = corpus();
+    assert_eq!(first, second);
 }
