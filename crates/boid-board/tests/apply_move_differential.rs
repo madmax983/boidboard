@@ -184,9 +184,11 @@ fn applying_every_legal_root_move_agrees_with_stockfish() {
         }
     }
 
-    assert!(
-        compared >= 150,
-        "only {compared} moves were compared, which is too few to have covered the move kinds"
+    // Exact, not a floor: D-0027's register quotes this number, so it has to be pinned
+    // rather than bounded. A change here means the fixture or the move rules moved.
+    assert_eq!(
+        compared, 179,
+        "the six fixture positions have 179 legal root moves between them"
     );
     eprintln!("compared {compared} root moves against Stockfish");
 }

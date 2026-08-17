@@ -252,6 +252,27 @@ jobs:
           fi
           echo "no unmake_move present"
 
+      - name: Every test the decision log cites resolves to a test that exists (D-0028)
+        run: |
+          set -euo pipefail
+          # Four Evidence citations in docs/DECISIONS.md named tests that did not exist --
+          # they had been renamed and the log was not. A citation nobody resolves is worse
+          # than no citation, because a reader trusts it.
+          missing=0
+          # Only file::test_name shapes, where the file half matches a real test file.
+          refs=$(grep -oE '\b[a-z_][a-z0-9_]*::[a-z_][a-z0-9_]*\b' docs/DECISIONS.md | sort -u)
+          for ref in $refs; do
+            file="${ref%%::*}"
+            name="${ref##*::}"
+            [ -f "crates/boid-board/tests/${file}.rs" ] || continue
+            if ! grep -rq "fn ${name}\b" "crates/boid-board/tests/${file}.rs"; then
+              echo "UNRESOLVED: docs/DECISIONS.md cites ${ref}, which does not exist"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          echo "every cited test resolves"
+
       - name: Anti-theatre scan
         run: |
           set -euo pipefail

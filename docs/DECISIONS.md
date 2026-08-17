@@ -763,7 +763,7 @@ Rule:         `Board` must never store an en-passant rank, and the en-passant fi
   after every double push regardless of capturability. No field of `Board` may be undefined
   after `apply_move`.
 
-Evidence:     `zobrist_incremental::e3_with_black_to_move_and_e6_with_white_differ_by_exactly_the_side_key`,
+Evidence:     `zobrist_incremental::the_en_passant_contribution_depends_on_the_file_and_not_the_rank`,
   and the Stockfish differential harness excludes the ep field by name rather than by
   accident.
 
@@ -805,8 +805,8 @@ Rule:         For every FEN `from_fen` accepts, `to_fen(from_fen(f))` equals `f`
   has six fields and `f` followed by " 0 1" when it has four; there is no third case.
   `tests/fixtures/perft_oracle.txt` is not edited to make this easier.
 
-Evidence:     `fen_roundtrip::six_field_fens_round_trip_byte_identically`,
-  `fen_roundtrip::the_four_field_kiwipete_fen_round_trips_to_its_canonical_six_field_form`,
+Evidence:     `fen_roundtrip::six_field_fixture_rows_round_trip_byte_identically`,
+  `fen_roundtrip::the_four_field_kiwipete_row_expands_to_its_canonical_six_field_form`,
   and an empty `git diff origin/main -- tests/fixtures/perft_oracle.txt`.
 
 Consequences: AC1 is reported as satisfied under a declared narrowing, and the narrowing is
@@ -967,7 +967,7 @@ Rule:         Zobrist keys are produced by a `const fn` from a hardcoded seed; n
 Evidence:     `zobrist_table::splitmix64_matches_the_published_vectors` (vectors typed from
   outside this project), the `const _` forcing item, `scripts/zobrist-reference.py` as an
   independent derivation diffed in CI, and
-  `zobrist_digest::zobrist_keys_are_baked_into_the_binary`.
+  `zobrist_digest::the_keys_are_baked_into_the_executable_image`.
 
 Consequences: A bug repro from issue #6 quotes a key and the key means the same thing on
   every machine, forever, including a machine that has never run this repository's tests.
@@ -1075,14 +1075,16 @@ Decision:     The register:
     zobrist table digest        31e98d78da31b5d7439ed0601a698f7ab6dc54499d3e0be77d3be645dee2a314
                                 zobrist_digest::the_key_digest_is_pinned, plus
                                 scripts/zobrist-reference.py diffed by CI
-    mean key population count   31.881, within a 28..=36 sanity band
-                                zobrist_table::the_mean_population_count_is_close_to_half_the_word
+    total key population count  24,903 over 781 keys, a mean of 31.886044
+                                zobrist_table::the_population_count_is_exactly_what_the_decision_log_records
     size_of::<Move>()           2 bytes
     castling revocation squares six non-zero RIGHTS_LOST entries
     generated corpus            exactly 200 cases, 190+ distinct, 8+ castling masks,
                                 4+ en-passant states, both sides, one clock >= 100
                                 fen_roundtrip::the_generated_corpus_round_trips_byte_identically
-    proptest transitive tree    18 crates with default features off (39 with them on)
+    proptest transitive tree    16 crates with default features off, 26 with them on
+                                (unique packages from `cargo tree -e normal,dev`, excluding
+                                this workspace's own)
     Stockfish differential      179 legal root moves over 6 positions, agreeing on five of
                                 the six FEN fields
                                 apply_move_differential::applying_every_legal_root_move_agrees_with_stockfish
@@ -1102,6 +1104,78 @@ Decision:     The register:
 Rule:         Every number in this register must remain asserted by the test named beside
   it; a number that loses its test is deleted from the register in the same change.
 
-Evidence:     `cargo test --workspace` -- 167 tests.
+Evidence:     `cargo test --workspace` -- 225 tests. The count itself is deliberately
+  NOT pinned by a test: a test asserting the test count fails on every addition, which
+  trains people to update it without reading it. It is reported in the pull request, where
+  it is checked against a run rather than against a constant.
 
 Consequences: Issue #5 inherits a written list of what it must add rather than a guess.
+
+---
+
+## D-0028 — Corrections found by the multi-angle review of issue #4
+
+Status:       Accepted
+Date:         2026-08-17
+
+Context:      Before this branch was proposed for merge, six independent review angles were
+  run against it with an adversarial verification pass that reproduced every claim. 34
+  findings survived verification and 6 were rejected. Most were defects in the code and are
+  fixed in the branch. These are the ones that were false claims by this project about
+  itself, which D-0016 holds to a higher standard than defects in code.
+
+Decision:     The corrections are recorded here rather than by editing history.
+
+  **The ladder's anti-theatre claim was wrong, and understated.** PR #22 reported that three
+  intermediate commits fail `scripts/anti-theatre.sh`. The true number is **nine**: every
+  commit from `001f9cf` to `4f1ec6a` inclusive. The cause is a single doc comment in
+  `tests/zobrist_digest.rs` that contained the literal attribute it was warning about;
+  the scanner cannot parse Rust and is right to be literal. It was fixed at `06eceb1`, and
+  `HEAD` is clean. Three of those nine commit messages assert "anti-theatre 0" in their
+  evidence blocks; those assertions are false and this entry is their correction.
+
+  **Commit `bcdebdd`'s RED evidence was wrong three ways.** It claims "22 tests, all red".
+  Measured at that commit: **18** `#[test]` items, of which **2 passed and 16 failed**, and
+  the panic string is `Board::try_apply_move`, not `Board::apply_move` as the message says.
+
+  **Seven numbers were wrong.**
+
+      claimed                          true
+      mean key popcount 31.881         31.886044 (total 24,903 over 781 keys)
+      proptest tree 18 / 39 crates     16 with default features off, 26 with them on
+      167 tests                        the count moved and the register was not updated
+      MAX_FEN_LEN arithmetic "= 94"    the terms sum to 93; the constant 94 is a safe
+                                       over-estimate, but the arithmetic shown was wrong
+      "five fixture rows" round-trip   the array holds six
+      "4,608 legal state words"        no test computes that; the test that exists
+                                       exhausts the 288 hashed-bit combinations
+      PR #22's "19 tests" in board_apply  18 at the time of writing
+
+  **Four decision-log Evidence citations named tests that do not exist.** Corrected above.
+  A `repo-invariants` step now resolves every `file::test_name` cited in this log against
+  the source, so a citation cannot silently rot again.
+
+  **D-0021's Rule was unsatisfied.** It requires that every rule `from_fen` deliberately
+  does not enforce have a test asserting a violating FEN is accepted, and it cited
+  `tests/fen_language.rs` -- which did not exist. `src/fen.rs`'s module doc cited it too.
+  The file now exists and covers all seven unenforced rules.
+
+  **D-0024's const-evaluation argument was inverted.** It claims
+  `const _TABLE_IS_CONST_EVALUATED` is what forces compile-time evaluation. Measured:
+  deleting that item and making `build_table` non-`const` still fails to compile, because
+  the `static ZOBRIST` initialiser is itself a const context. And keeping the item while
+  replacing the `static` with a same-seed `LazyLock` COMPILES -- only
+  `the_keys_are_baked_into_the_executable_image` catches that. So the forcing item is the
+  `static`, the `const _` is a belt-and-braces restatement of it, and the load-bearing
+  runtime guard is the image test. The claim was too strong in one direction and missed the
+  real mechanism in the other.
+
+Rule:         A claim about which mechanism enforces a property must be verified by
+  removing that mechanism and observing the failure, not by reasoning about it. Every
+  `file::test_name` cited in this log must resolve to a test that exists.
+
+Evidence:     The `repo-invariants` job's "decision-log citations resolve" step; the
+  falsification probes quoted in the review-fix commits.
+
+Consequences: Issue #5 inherits a decision log whose citations are mechanically checked,
+  and a corrected account of why the zobrist table cannot come from entropy.

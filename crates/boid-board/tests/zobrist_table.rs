@@ -256,14 +256,22 @@ fn every_bit_position_is_both_set_and_clear_somewhere_in_the_table() {
     assert_eq!(zeros, u64::MAX, "some bit is set in every key");
 }
 
-/// Not a statistical test with a tuned threshold — a wide sanity band. A table whose mean
-/// population count is far from 32 is not a mixer's output at all.
+/// The exact total population count, plus a wide sanity band on its mean.
+///
+/// The band alone is what this test used to be, and a review pointed out the consequence:
+/// the decision log quoted a mean of 31.881 that no test held, and the true value is
+/// 31.886044. A band cannot pin a number the project states elsewhere. The total is exact
+/// and independently reproducible with `scripts/zobrist-reference.py`.
 #[test]
-fn the_mean_population_count_is_close_to_half_the_word() {
+fn the_population_count_is_exactly_what_the_decision_log_records() {
     let total: u32 = zobrist::table().iter().map(|k| k.get().count_ones()).sum();
+    assert_eq!(
+        total, 24_903,
+        "the total population count of the 781 keys is a fixed property of the seed"
+    );
     let mean = f64::from(total) / KEY_COUNT as f64;
     assert!(
         (28.0..=36.0).contains(&mean),
-        "mean popcount {mean:.3} is not consistent with a 64-bit mixer's output"
+        "mean popcount {mean:.6} is not consistent with a 64-bit mixer's output"
     );
 }

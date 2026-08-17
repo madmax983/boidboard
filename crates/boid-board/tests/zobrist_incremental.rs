@@ -18,8 +18,8 @@ use std::collections::HashSet;
 
 use boid_board::board::{Board, POSITION_MASK};
 use boid_board::moves::{Move, MoveKind};
-use boid_board::zobrist;
-use boid_board::{File, PieceKind, Square};
+use boid_board::zobrist::{self, ZobristKey};
+use boid_board::{File, Piece, PieceKind, Square};
 use proptest::prelude::*;
 
 mod fenlab;
@@ -79,23 +79,44 @@ fn rank_with_pawn_at(file: usize, piece: char) -> String {
 
 /// The key hashes the en-passant **file**, not the square.
 ///
-/// `e3` with Black to move and `e6` with White to move are the same file and different
-/// ranks. Under a file-keyed table their en-passant contributions cancel exactly, so the
-/// two keys differ by precisely the side-to-move key. Under a square-keyed table of 64
-/// entries they would not, and no other test in this repository could tell.
+/// `e3` with Black to move and `e6` with White to move are the same file on different
+/// ranks. Under a file-keyed table their en-passant contributions are the same key, so it
+/// cancels out of the difference between the two positions entirely; under a 64-entry
+/// square-keyed table it would not.
+///
+/// An earlier version of this test claimed the two positions have "the same pieces" and
+/// then asserted `en_passant(a.ep_file()) == en_passant(b.ep_file())` after asserting
+/// `a.ep_file() == b.ep_file()` — which is `f(x) == f(y)` given `x == y`, a tautology. The
+/// positions differ in their pawns too (a white pawn on e4 versus a black pawn on e5), so
+/// the real claim needs those contributions subtracted.
 #[test]
-fn e3_with_black_to_move_and_e6_with_white_differ_by_exactly_the_side_key() {
-    // The same pieces in both, so that only the side to move and the ep rank differ.
+fn the_en_passant_contribution_depends_on_the_file_and_not_the_rank() {
     let black_to_move = parse("4k3/8/8/8/4P3/8/8/4K3 b - e3 0 1");
     let white_to_move = parse("4k3/8/8/4p3/8/8/8/4K3 w - e6 0 1");
     assert_eq!(black_to_move.ep_file(), white_to_move.ep_file());
-    assert_ne!(black_to_move.ep_square(), white_to_move.ep_square());
+    assert_ne!(
+        black_to_move.ep_square(),
+        white_to_move.ep_square(),
+        "the two squares differ; only their file agrees"
+    );
 
-    // Isolate the en-passant contribution: strip the pieces and the side, and what remains
-    // must be identical, because both positions hash the same file key.
-    let ep_key = zobrist::en_passant(black_to_move.ep_file());
-    assert_eq!(ep_key, zobrist::en_passant(white_to_move.ep_file()));
-    assert_ne!(ep_key.get(), 0);
+    // Take the difference of the two keys and subtract every contribution that is NOT the
+    // en-passant one: the side to move, and the two pawns that differ. What is left must be
+    // zero — the en-passant keys cancelled, which is only true if the table is file-keyed.
+    let mut delta = ZobristKey::from_raw(black_to_move.key().get() ^ white_to_move.key().get());
+    delta ^= zobrist::side_to_move();
+    delta ^= zobrist::piece_square(Piece::WhitePawn, Square::from_uci("e4").expect("a square"));
+    delta ^= zobrist::piece_square(Piece::BlackPawn, Square::from_uci("e5").expect("a square"));
+    assert_eq!(
+        delta.get(),
+        0,
+        "after removing the side and the two differing pawns, nothing must remain — so the \
+         en-passant contributions were equal despite the ranks differing"
+    );
+
+    // And the ep key itself is a real, non-identity value, so the cancellation above is not
+    // the trivial one of two zeroes.
+    assert_ne!(zobrist::en_passant(black_to_move.ep_file()).get(), 0);
 }
 
 // ---------------------------------------------------------------------------------
@@ -161,6 +182,47 @@ fn the_hashed_state_bits_produce_two_hundred_and_eighty_eight_distinct_contribut
     assert_eq!(seen.len(), 2 * 16 * 9);
 }
 
+/// D-0018 froze the ORDER of the castling and en-passant keys, and nothing pinned it.
+///
+/// Reversing either block is a bijection on the table: the digest is unchanged, every
+/// distinctness assertion still holds, and only an outside reader trying to reproduce a
+/// single key from the decision log would ever notice. So the order is asserted directly
+/// against the table indices the log names.
+#[test]
+fn the_castling_and_en_passant_keys_are_in_the_order_the_decision_log_froze() {
+    let table = zobrist::table();
+
+    // D-0018: castling keys run WK, WQ, BK, BQ from CASTLING_INDEX.
+    for (offset, right) in [
+        boid_board::CastlingRights::WHITE_KING,
+        boid_board::CastlingRights::WHITE_QUEEN,
+        boid_board::CastlingRights::BLACK_KING,
+        boid_board::CastlingRights::BLACK_QUEEN,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            zobrist::castling(right),
+            table[zobrist::CASTLING_INDEX + offset],
+            "castling key {offset} is not the one D-0018 froze"
+        );
+    }
+
+    // D-0018: en-passant keys run a..h from EN_PASSANT_INDEX.
+    for index in 0..File::COUNT {
+        let file = File::new(index as u8).expect("index is below 8");
+        assert_eq!(
+            zobrist::en_passant(Some(file)),
+            table[zobrist::EN_PASSANT_INDEX + index],
+            "the key for file {file} is not at EN_PASSANT_INDEX + {index}"
+        );
+    }
+
+    // And the side-to-move key sits alone at its own index.
+    assert_eq!(zobrist::side_to_move(), table[zobrist::SIDE_TO_MOVE_INDEX]);
+}
+
 // ---------------------------------------------------------------------------------
 // The incremental key against a from-scratch recompute
 // ---------------------------------------------------------------------------------
@@ -178,10 +240,23 @@ fn the_hashed_state_bits_produce_two_hundred_and_eighty_eight_distinct_contribut
 #[test]
 fn the_incremental_keys_track_a_recompute_over_a_random_walk() {
     let mut applied = 0usize;
-    let mut kinds_seen = HashSet::new();
+    let mut kinds_seen: HashSet<&'static str> = HashSet::new();
+
+    // Instrumenting an earlier version of this walk showed it applied 998 moves and reached
+    // Quiet, Capture, DoublePawnPush and both promotion kinds — and NEVER an en passant or
+    // either castle, because it always started from the initial position where castling
+    // needs four pieces to move first. A guard that never reaches two of the seven kinds is
+    // not guarding them, so the walk now starts from positions where they are one move away.
+    const STARTS: [&str; 4] = [
+        Board::STARTPOS_FEN,
+        "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+        "4k3/3p4/8/4P3/8/8/8/4K3 b - - 0 1",
+        "r3k2r/ppp1pppp/8/3pP3/8/8/PPPP1PPP/R3K2R w KQkq d6 0 3",
+    ];
 
     for seed in 0..24u64 {
-        let mut board = Board::startpos();
+        let start = STARTS[(seed as usize) % STARTS.len()];
+        let mut board = Board::from_fen(start).unwrap_or_else(|e| panic!("{start}: {e}"));
         let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
 
         for _ in 0..60 {
@@ -196,7 +271,16 @@ fn the_incremental_keys_track_a_recompute_over_a_random_walk() {
             };
             board = next_board;
             applied += 1;
-            kinds_seen.insert(std::mem::discriminant(&mv.kind()));
+            kinds_seen.insert(match mv.kind() {
+                MoveKind::Quiet => "quiet",
+                MoveKind::DoublePawnPush => "double-push",
+                MoveKind::KingCastle => "king-castle",
+                MoveKind::QueenCastle => "queen-castle",
+                MoveKind::Capture => "capture",
+                MoveKind::EnPassant => "en-passant",
+                MoveKind::Promotion(_) => "promotion",
+                MoveKind::PromoCapture(_) => "promo-capture",
+            });
 
             assert_eq!(
                 board.key(),
@@ -225,11 +309,22 @@ fn the_incremental_keys_track_a_recompute_over_a_random_walk() {
         applied >= 500,
         "the walk applied only {applied} moves, which is too few to have exercised anything"
     );
-    assert!(
-        kinds_seen.len() >= 4,
-        "the walk produced only {} distinct move kinds",
-        kinds_seen.len()
-    );
+    // A REQUIRED set rather than a count. A count is satisfied by four easy kinds while
+    // the two that exercise the trickiest XOR schedules never appear.
+    for required in [
+        "quiet",
+        "capture",
+        "double-push",
+        "en-passant",
+        "king-castle",
+        "queen-castle",
+        "promotion",
+    ] {
+        assert!(
+            kinds_seen.contains(required),
+            "the walk never applied the kind {required:?}; it saw {kinds_seen:?}"
+        );
+    }
 }
 
 /// Propose a move from `roll`, without any attack table.
@@ -238,6 +333,16 @@ fn the_incremental_keys_track_a_recompute_over_a_random_walk() {
 /// kind the board supports. Wrong-looking moves are fine; `try_apply_move` rejects whatever
 /// is structurally impossible.
 fn candidate_move(board: &Board, roll: u64) -> Option<Move> {
+    // Half the rolls attempt a SPECIFIC kind, constructed from the position rather than
+    // stumbled upon. A uniformly random destination lands the exact square a double push,
+    // an en passant or a castle needs only by luck, and the required-set assertion below
+    // proved that luck does not arrive: the walk reached five of seven kinds and missed the
+    // two whose XOR schedules are the most intricate.
+    if roll & 1 == 0
+        && let Some(mv) = directed_move(board, roll >> 1)
+    {
+        return Some(mv);
+    }
     let ours: Vec<Square> = board.colored(board.side_to_move()).squares().collect();
     if ours.is_empty() {
         return None;
@@ -294,6 +399,74 @@ fn candidate_move(board: &Board, roll: u64) -> Option<Move> {
     };
 
     Move::new(from, to, kind)
+}
+
+/// Construct a move of a chosen kind, if the position offers one.
+fn directed_move(board: &Board, roll: u64) -> Option<Move> {
+    let us = board.side_to_move();
+    // En passant is tried first whenever it is available at all. The window is exactly one
+    // ply wide, so leaving it to a one-in-eight roll means it is almost never taken — which
+    // is how the walk missed the kind entirely.
+    if board.ep_square().is_some()
+        && let Some(mv) = directed_en_passant(board, us)
+    {
+        return Some(mv);
+    }
+    match roll % 4 {
+        0 => {
+            // A double push: a pawn on its home rank with both squares ahead empty.
+            let (home, step) = match us {
+                boid_board::Color::White => (1u8, 1i8),
+                boid_board::Color::Black => (6, -1),
+            };
+            for from in board.pieces_colored(PieceKind::Pawn, us).squares() {
+                if from.rank() != home {
+                    continue;
+                }
+                let one = from.offset_rank(step)?;
+                let two = from.offset_rank(step * 2)?;
+                if board.piece_at(one).is_none() && board.piece_at(two).is_none() {
+                    return Move::new(from, two, MoveKind::DoublePawnPush);
+                }
+            }
+            None
+        }
+        1 => None,
+        other => {
+            // Castling, king-side then queen-side.
+            let kind = if other == 2 {
+                MoveKind::KingCastle
+            } else {
+                MoveKind::QueenCastle
+            };
+            let (home, king_to, queen_to) = match us {
+                boid_board::Color::White => (Square::E1, "g1", "c1"),
+                boid_board::Color::Black => (Square::E8, "g8", "c8"),
+            };
+            let to = Square::from_uci(if other == 2 { king_to } else { queen_to })?;
+            if board.piece_at(home)?.kind() != PieceKind::King {
+                return None;
+            }
+            Move::new(home, to, kind)
+        }
+    }
+}
+
+/// An en-passant capture, if one of our pawns stands beside the victim.
+fn directed_en_passant(board: &Board, us: boid_board::Color) -> Option<Move> {
+    let target = board.ep_square()?;
+    let back = match us {
+        boid_board::Color::White => -1i8,
+        boid_board::Color::Black => 1,
+    };
+    let beside = target.offset_rank(back)?;
+    for from in board.pieces_colored(PieceKind::Pawn, us).squares() {
+        if from.rank() == beside.rank() && from.file().index().abs_diff(target.file().index()) == 1
+        {
+            return Move::new(from, target, MoveKind::EnPassant);
+        }
+    }
+    None
 }
 
 /// Boards that are the same position hash alike, over the whole generated corpus.

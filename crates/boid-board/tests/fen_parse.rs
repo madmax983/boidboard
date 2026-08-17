@@ -401,6 +401,76 @@ fn rejects_an_en_passant_square_that_no_double_push_could_have_produced() {
     assert_eq!(board.ep_file(), Square::from_uci("e6").map(Square::file));
 }
 
+/// The en-passant reachability rule has three clauses, and two of them were unpinned: a
+/// reviewer deleted the "target must be empty" and "origin must be empty" checks
+/// independently and the whole suite stayed green.
+#[test]
+fn each_en_passant_reachability_clause_is_enforced_separately() {
+    let ep = Square::from_uci("e6").expect("a square");
+    // The pusher is present but the TARGET square is occupied -- impossible, because the
+    // pawn passed through it.
+    assert_eq!(
+        err("4k3/8/4r3/4p3/8/8/8/4K3 w - e6 0 1"),
+        FenError::EnPassantNotReachable { square: ep }
+    );
+    // The pusher is present and the target empty, but the square it left is occupied.
+    assert_eq!(
+        err("4k3/4r3/8/4p3/8/8/8/4K3 w - e6 0 1"),
+        FenError::EnPassantNotReachable { square: ep }
+    );
+    // The target and origin are empty but there is no pawn that could have pushed.
+    assert_eq!(
+        err("4k3/8/8/8/8/8/8/4K3 w - e6 0 1"),
+        FenError::EnPassantNotReachable { square: ep }
+    );
+    // All three satisfied.
+    ok("4k3/8/8/4p3/8/8/8/4K3 w - e6 0 1");
+}
+
+/// The en-passant target must be on rank 3 or 6 -- the shape check, which is distinct from
+/// the side-to-move check that follows it.
+#[test]
+fn an_en_passant_target_off_ranks_three_and_six_is_rejected_on_its_shape() {
+    for square in ["e4", "e5", "e1", "e8", "e2", "e7"] {
+        assert_eq!(
+            err(&format!("4k3/8/8/4p3/8/8/8/4K3 w - {square} 0 1")),
+            FenError::BadEnPassantSquare,
+            "{square} is not on rank 3 or 6"
+        );
+    }
+}
+
+/// `NonAscii`'s offset is a BYTE offset naming the first offending byte, not a char index.
+#[test]
+fn the_non_ascii_offset_is_the_byte_index_of_the_first_offending_byte() {
+    // U+00A0 sits immediately after the 19-byte placement field.
+    let fen = "4k3/8/8/8/8/8/8/4K3\u{a0}w - - 0 1";
+    assert_eq!(err(fen), FenError::NonAscii { offset: 19 });
+    // Once a multibyte character appears, the byte offset and the char index diverge, and
+    // this is the byte offset.
+    let fen = "4k3/8/8/8/8/8/8/4K3 w - - 0 \u{e9}1";
+    assert_eq!(err(fen), FenError::NonAscii { offset: 28 });
+    assert_eq!(fen.chars().count(), 30);
+    assert_eq!(fen.len(), 31, "one character occupies two bytes");
+}
+
+/// `EmptyField` is reachable for the two clock fields, not only for the first four.
+#[test]
+fn an_empty_clock_field_is_reported_as_such() {
+    assert_eq!(
+        err("4k3/8/8/8/8/8/8/4K3 w - -  1"),
+        FenError::EmptyField {
+            field: FenField::HalfmoveClock
+        }
+    );
+    assert_eq!(
+        err("4k3/8/8/8/8/8/8/4K3 w - - 0 "),
+        FenError::EmptyField {
+            field: FenField::FullmoveNumber
+        }
+    );
+}
+
 // ---------------------------------------------------------------------------------
 // Clocks
 // ---------------------------------------------------------------------------------
@@ -556,9 +626,15 @@ fn never_panics_on_adversarial_inputs() {
         "\u{1F600} w - - 0 1",
         "4k3/8/8/8/8/8/8/4K3 w KQkq e3 0 1",
     ];
+    // The contract under test is "returns rather than unwinds", so the absence of a panic
+    // IS the assertion. But every one of these is in fact rejected, and saying so keeps the
+    // list honest -- an earlier comment claimed some were legal, and a review measured that
+    // none of the ten were.
     for input in inputs {
-        // The contract is "returns", not "returns Err": some of these are legal.
-        let _ = Board::from_fen(input);
+        assert!(
+            Board::from_fen(input).is_err(),
+            "{input:?} was expected to be rejected"
+        );
     }
 }
 

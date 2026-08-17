@@ -563,14 +563,20 @@ impl Bitboard {
     }
 
     /// The squares in the set, in ascending LERF order.
-    pub fn squares(self) -> impl Iterator<Item = Square> {
+    ///
+    /// Returns the concrete iterator rather than `impl Iterator`. Return-position impl
+    /// Trait leaks only auto traits, so with the opaque form the `ExactSizeIterator` impl
+    /// below was unreachable from outside this module -- `squares().len()` did not compile.
+    /// Issue #5's move generation counts bitboard populations constantly.
+    #[must_use]
+    pub fn squares(self) -> BitboardIter {
         BitboardIter(self.0)
     }
 }
 
 /// Iterator over the squares of a [`Bitboard`], least-significant bit first.
 #[derive(Debug, Clone)]
-struct BitboardIter(u64);
+pub struct BitboardIter(u64);
 
 impl Iterator for BitboardIter {
     type Item = Square;
@@ -1210,5 +1216,196 @@ impl fmt::Debug for Board {
             .field("key", &format_args!("{:x}", self.key))
             .field("pawn_key", &format_args!("{:x}", self.pawn_key))
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for [`Board::check_invariants`].
+    //!
+    //! These live inside the crate rather than in `tests/` for a reason a review made
+    //! concrete: `Board`'s fields are private and every public constructor maintains the
+    //! invariants, so from an integration test there is **no way to build a corrupt board**.
+    //! A reviewer replaced the whole body of `check_invariants` with `Ok(())` and the entire
+    //! suite stayed green — the guard was unfalsifiable, and so was every `BoardInvariant`
+    //! variant.
+    //!
+    //! D-0023 promises issue #5 that it can prove a corrupted board is detected by calling
+    //! the public `check_invariants` rather than by a corruption hook inside `apply_move`.
+    //! That promise needs these tests to be true.
+
+    use super::*;
+
+    /// A square by name, for the corruption sites below.
+    fn sq(name: &str) -> Square {
+        Square::from_uci(name).expect("a square")
+    }
+
+    fn startpos() -> Board {
+        Board::from_fen(Board::STARTPOS_FEN).expect("the start position parses")
+    }
+
+    #[test]
+    fn a_healthy_board_satisfies_every_invariant() {
+        assert_eq!(startpos().check_invariants(), Ok(()));
+    }
+
+    #[test]
+    fn a_desynced_mailbox_byte_is_detected() {
+        let mut board = startpos();
+        board.mailbox[sq("e2").index()] = None;
+        assert!(
+            matches!(
+                board.check_invariants(),
+                Err(BoardInvariant::MailboxDisagrees { .. })
+            ),
+            "got {:?}",
+            board.check_invariants()
+        );
+    }
+
+    #[test]
+    fn a_stale_key_is_detected() {
+        let mut board = startpos();
+        board.key = ZobristKey::from_raw(board.key.get() ^ 1);
+        assert!(matches!(
+            board.check_invariants(),
+            Err(BoardInvariant::KeyDisagrees { .. })
+        ));
+    }
+
+    #[test]
+    fn a_stale_pawn_key_is_detected() {
+        let mut board = startpos();
+        board.pawn_key = PawnKey::ZERO;
+        assert!(matches!(
+            board.check_invariants(),
+            Err(BoardInvariant::PawnKeyDisagrees { .. })
+        ));
+    }
+
+    #[test]
+    fn a_missing_king_is_detected() {
+        let mut board = startpos();
+        board.remove(Piece::WhiteKing, Square::E1);
+        assert_eq!(
+            board.check_invariants(),
+            Err(BoardInvariant::KingCount {
+                color: Color::White,
+                found: 0
+            })
+        );
+    }
+
+    #[test]
+    fn overlapping_colours_are_detected() {
+        let mut board = startpos();
+        board.colors[Color::Black.index()] = board.colors[Color::Black.index()].with(sq("e2"));
+        assert!(matches!(
+            board.check_invariants(),
+            Err(BoardInvariant::ColorsOverlap { .. })
+        ));
+    }
+
+    #[test]
+    fn overlapping_piece_kinds_are_detected() {
+        let mut board = startpos();
+        board.pieces[PieceKind::Rook.index()] =
+            board.pieces[PieceKind::Rook.index()].with(sq("e2"));
+        assert!(matches!(
+            board.check_invariants(),
+            Err(BoardInvariant::KindsOverlap { .. })
+        ));
+    }
+
+    #[test]
+    fn an_occupancy_disagreement_is_detected() {
+        let mut board = startpos();
+        // A square in a colour bitboard but in no piece bitboard.
+        board.colors[Color::White.index()] = board.colors[Color::White.index()].with(sq("e4"));
+        assert_eq!(
+            board.check_invariants(),
+            Err(BoardInvariant::OccupancyDisagrees)
+        );
+    }
+
+    #[test]
+    fn reserved_state_bits_are_detected() {
+        let mut board = startpos();
+        board.state |= 1 << 63;
+        assert!(matches!(
+            board.check_invariants(),
+            Err(BoardInvariant::ReservedStateBitsSet { .. })
+        ));
+    }
+
+    #[test]
+    fn an_invalid_en_passant_nibble_is_detected() {
+        let mut board = startpos();
+        // 9..=15 are neither a file nor the "none" sentinel.
+        board.state = (board.state & !(0b1111 << EN_PASSANT_SHIFT)) | (12 << EN_PASSANT_SHIFT);
+        assert_eq!(
+            board.check_invariants(),
+            Err(BoardInvariant::EnPassantNibbleInvalid { nibble: 12 })
+        );
+    }
+
+    #[test]
+    fn a_zero_fullmove_number_is_detected() {
+        let mut board = startpos();
+        board.state &= !(0xFFFF << FULLMOVE_SHIFT);
+        assert_eq!(
+            board.check_invariants(),
+            Err(BoardInvariant::FullmoveNumberIsZero)
+        );
+    }
+
+    /// Every variant of the enum is produced by one of the tests above.
+    #[test]
+    fn every_board_invariant_variant_is_reachable() {
+        let mut board = startpos();
+        let mut seen: Vec<BoardInvariant> = Vec::new();
+
+        board.state |= 1 << 63;
+        seen.push(board.check_invariants().expect_err("reserved bits"));
+        board = startpos();
+        board.state = (board.state & !(0b1111 << EN_PASSANT_SHIFT)) | (12 << EN_PASSANT_SHIFT);
+        seen.push(board.check_invariants().expect_err("ep nibble"));
+        board = startpos();
+        board.state &= !(0xFFFF << FULLMOVE_SHIFT);
+        seen.push(board.check_invariants().expect_err("fullmove"));
+        board = startpos();
+        board.pieces[PieceKind::Rook.index()] =
+            board.pieces[PieceKind::Rook.index()].with(sq("e2"));
+        seen.push(board.check_invariants().expect_err("kinds overlap"));
+        board = startpos();
+        board.colors[Color::Black.index()] = board.colors[Color::Black.index()].with(sq("e2"));
+        seen.push(board.check_invariants().expect_err("colours overlap"));
+        board = startpos();
+        board.colors[Color::White.index()] = board.colors[Color::White.index()].with(sq("e4"));
+        seen.push(board.check_invariants().expect_err("occupancy"));
+        board = startpos();
+        board.mailbox[sq("e2").index()] = None;
+        seen.push(board.check_invariants().expect_err("mailbox"));
+        board = startpos();
+        board.remove(Piece::WhiteKing, Square::E1);
+        seen.push(board.check_invariants().expect_err("king count"));
+        board = startpos();
+        board.key = ZobristKey::from_raw(board.key.get() ^ 1);
+        seen.push(board.check_invariants().expect_err("key"));
+        board = startpos();
+        board.pawn_key = PawnKey::ZERO;
+        seen.push(board.check_invariants().expect_err("pawn key"));
+
+        assert_eq!(
+            seen.len(),
+            10,
+            "BoardInvariant has ten variants and each must be produced by a corrupt board"
+        );
+        // And every one of them renders a distinct message, so a failure names its cause.
+        let mut messages: Vec<String> = seen.iter().map(ToString::to_string).collect();
+        messages.sort();
+        messages.dedup();
+        assert_eq!(messages.len(), 10);
     }
 }

@@ -7,7 +7,7 @@
 use std::mem::{align_of, size_of};
 
 use boid_board::board::{Board, POSITION_MASK};
-use boid_board::{CastlingRights, Color, File, Piece, PieceKind, Square};
+use boid_board::{Bitboard, CastlingRights, Color, File, Piece, PieceKind, Square};
 
 // ---------------------------------------------------------------------------------
 // Acceptance criterion 3 — size
@@ -271,6 +271,63 @@ fn files_round_trip_through_their_letters() {
     }
     assert_eq!(File::from_char('i'), None);
     assert_eq!(File::new(8), None);
+}
+
+/// Guards on the primitives that a reviewer removed with the suite still green.
+#[test]
+fn the_primitive_range_checks_actually_reject() {
+    // offset_rank must decline both ends, not only the bottom.
+    assert_eq!(Square::A1.offset_rank(-1), None);
+    assert_eq!(Square::H8.offset_rank(1), None);
+    assert_eq!(
+        Square::A1.offset_rank(7).map(|s| s.to_string()),
+        Some("a8".into())
+    );
+    assert_eq!(Square::A1.offset_rank(8), None);
+
+    // from_uci is length-checked, so a longer coordinate is not silently truncated.
+    assert_eq!(Square::from_uci("e"), None);
+    assert_eq!(Square::from_uci("e44"), None);
+    assert_eq!(Square::from_uci(""), None);
+    assert_eq!(Square::from_uci("e9"), None);
+    assert_eq!(Square::from_uci("i4"), None);
+
+    // contains is a SUBSET test, not "any bit in common". A reviewer replaced it with the
+    // latter and nothing disagreed.
+    let both = CastlingRights::WHITE_KING.with(CastlingRights::BLACK_QUEEN);
+    assert!(both.contains(CastlingRights::WHITE_KING));
+    assert!(both.contains(both));
+    assert!(!both.contains(CastlingRights::ALL));
+    assert!(
+        !CastlingRights::WHITE_KING.contains(both),
+        "a single right does not contain a pair that merely overlaps it"
+    );
+    assert!(CastlingRights::ALL.contains(CastlingRights::NONE));
+}
+
+/// `Bitboard::squares` is an exact-size, cloneable iterator — not an opaque one.
+///
+/// The `ExactSizeIterator` impl existed but was unreachable: `squares()` returned
+/// `impl Iterator`, which leaks only auto traits, so `.len()` did not compile for any
+/// caller. Issue #5 counts bitboard populations constantly.
+#[test]
+fn bitboard_squares_is_an_exact_size_iterator() {
+    let board = Board::startpos();
+    let pawns = board.pieces(PieceKind::Pawn);
+    assert_eq!(pawns.squares().len(), 16);
+    assert_eq!(pawns.squares().len() as u32, pawns.count());
+
+    // And it is cloneable, so an attack set can be walked twice without recomputing.
+    let iter = pawns.squares();
+    let first: Vec<Square> = iter.clone().collect();
+    let second: Vec<Square> = iter.collect();
+    assert_eq!(first, second);
+    assert_eq!(first.len(), 16);
+
+    // Ascending LERF order, and the empty set yields nothing.
+    assert!(first.windows(2).all(|w| w[0] < w[1]));
+    assert_eq!(Bitboard::EMPTY.squares().len(), 0);
+    assert_eq!(Bitboard::EMPTY.squares().next(), None);
 }
 
 /// The seven fixture rows, read from the committed oracle rather than retyped.

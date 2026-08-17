@@ -374,6 +374,33 @@ fn check_invariants_rejects_a_board_whose_key_was_not_maintained() {
     assert_ne!(board.recomputed_key(), other.recomputed_key());
 }
 
+/// Both clocks saturate rather than wrapping, and that is a deliberate choice with a test.
+///
+/// A wrapping counter would turn a 65,535-ply game into move 0, which `from_fen` rejects;
+/// saturating leaves the board representable. No real game reaches either bound, but
+/// saturating arithmetic is exactly the construct that hides a missing reset, so it is
+/// pinned rather than left as an unexamined default.
+#[test]
+fn the_clocks_saturate_rather_than_wrapping() {
+    let board = play("4k3/8/8/8/8/8/8/4K3 w - - 65535 65535", &["e1e2"]);
+    assert_eq!(
+        board.halfmove_clock(),
+        65535,
+        "the halfmove clock saturates"
+    );
+    assert_eq!(board.fullmove_number(), 65535);
+    let board = play("4k3/8/8/8/8/8/8/4K3 b - - 65535 65535", &["e8e7"]);
+    assert_eq!(
+        board.fullmove_number(),
+        65535,
+        "the fullmove number saturates after Black's move rather than wrapping to 0, \
+         which would make the position unrepresentable"
+    );
+    assert_eq!(board.check_invariants(), Ok(()));
+    // And the emitted FEN still parses, which is what saturating buys.
+    assert!(Board::from_fen(&board.to_fen()).is_ok());
+}
+
 /// The `debug_assert!` recompute inside `apply_move` is only worth anything if it runs.
 ///
 /// Written as a binding rather than `assert!(cfg!(debug_assertions))`, because the inline

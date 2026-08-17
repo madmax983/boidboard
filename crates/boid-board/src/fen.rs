@@ -415,8 +415,11 @@ impl fmt::Display for Board {
 ///
 /// 71 placement bytes at most (64 piece letters plus 7 separators), one side letter, four
 /// castling letters, two en-passant letters, five halfmove digits, five fullmove digits and
-/// five spaces: 94. Used only to size the emitter's buffer, so an over-estimate costs
-/// nothing and an under-estimate costs one reallocation.
+/// five spaces. Those terms sum to 93; the constant is 94, one byte of slack.
+///
+/// Used only to size the emitter's buffer, so an over-estimate costs nothing and an
+/// under-estimate costs one reallocation. An earlier version of this comment asserted the
+/// terms summed to 94, which they do not -- a review caught it.
 pub const MAX_FEN_LEN: usize = 94;
 
 /// Fill `board`'s pieces from a FEN placement field.
