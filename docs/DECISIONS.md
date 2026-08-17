@@ -1132,3 +1132,57 @@ Evidence:     `cargo metadata` reports no non-dev dependencies for `boid-board`;
 Consequences: The nightly cold-cache job pays proptest's full compile every night. That is
   single-digit seconds beside a 23-billion-node perft replay, and the per-push AC1 path pays
   nothing at all.
+
+---
+
+## D-0025 — `FenError` discharges D-0014's deferral, and the oracle keeps its own body
+
+Status:       Accepted
+Date:         2026-08-17
+
+Context:      D-0014 named issue #4 by number: "`validate_fen` returns `Result<(), String>`.
+  An unmatchable error, immediately re-stringified into `OracleError::MalformedFen`. Correct
+  for a fixture validator, wrong for the FEN reader issue #4 will build on it: a caller that
+  wants to branch on *why* a FEN was rejected cannot. Deferred to #4, which should introduce
+  a typed `FenError` and have this function return it."
+
+Decision:     `validate_fen` returns `Result<(), FenError>`, `OracleError::MalformedFen`
+  carries the typed error, and `OracleError` gains an `Error::source` impl so the cause is
+  reachable by walking the chain as well as by matching. The CHECKS ARE UNCHANGED: each
+  `format!` became the corresponding variant and nothing else moved. No test file needed
+  editing, because every `MalformedFen` match site used `{ .. }` and the doctests assert only
+  `is_ok()` / `is_err()`.
+
+  Delegating `validate_fen` to `Board::from_fen` was considered and rejected on three
+  grounds. First, oracle independence, which is D-0002's spine: the fixture is the standard
+  the engine is judged against, and a checker that calls the implementation it judges has
+  stopped being one. Second, `oracle.rs` contains an independently written implementation of
+  the en-passant-rank-versus-side-to-move rule -- the single rule that a parse/emit bug
+  applied symmetrically would hide perfectly -- and delegation would delete it. Third, it
+  would have broken two currently-green positive assertions in `oracle_validation.rs`, which
+  are about a string being well-formed rather than about a position being playable.
+
+  The two therefore differ, in four named places, each pinned by a test:
+  an en-passant square with no pawn that could have produced it; a castling right with no
+  rook; a counter wider than the board's field; and the four-field form, which the oracle
+  accepts and the strict six-field `from_fen` refuses. The relation that must hold is
+  asserted directly: `validate_fen(f).is_err()` implies `Board::from_fen_with_layout(f)
+  .is_err()`, over the whole adversarial corpus, and all seven fixture FENs pass both.
+
+  Two strictness tiers are named in `FenTier`. `Structural` is decidable from the string;
+  `BoardLegality` is decidable from the assembled board without generating a move. "The side
+  not to move is in check" is in NEITHER: it needs attack generation, which is issue #5's.
+  Considered and rejected as parser rules: a halfmove clock bounded by the plies played
+  (an inference beyond the FEN spec -- real puzzle exporters reset the fullmove number while
+  leaving a large halfmove clock, and Stockfish accepts both), material bounds,
+  kings-adjacent, and Shredder/X-FEN castling acceptance.
+
+Rule:         There is one FEN error vocabulary and two implementations of the rules, with a
+  tested relation between them. Merging them requires a superseding entry.
+
+Evidence:     `fen_rejection::oracle_rejection_implies_parser_rejection`,
+  `all_seven_fixture_fens_pass_both_validators`,
+  `the_two_validators_differ_only_where_named`, `oracle_errors_carry_the_typed_cause`.
+
+Consequences: Issue #6's differential harness can tell a fixture transcription error from an
+  engine disagreement by matching on the variant, rather than by reading a string.

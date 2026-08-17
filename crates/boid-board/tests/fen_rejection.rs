@@ -15,7 +15,7 @@
 
 use boid_board::board::Board;
 use boid_board::fen::{FenError, FenField, FenLayout, FenTier};
-use boid_board::perft::oracle::{self, ORACLE_TEXT};
+use boid_board::perft::oracle::{self, ORACLE_TEXT, OracleError};
 use boid_board::types::Colour;
 
 /// The name of a variant, by exhaustive match. Adding a variant without adding it here is a
@@ -526,4 +526,108 @@ fn from_fen_points_four_field_users_at_the_layout_aware_entry_point() {
     ));
     let (_, layout) = Board::from_fen_with_layout(four).expect("four fields are valid here");
     assert_eq!(layout, FenLayout::FourField);
+}
+
+// -------------------------------------------------------------------------------------
+// The two FEN validators, and the relation between them.
+//
+// `oracle::validate_fen` is the fixture's structural checker; `Board::from_fen` is the
+// engine's reader. They now speak one error vocabulary and remain two implementations,
+// deliberately (D-0025): the oracle is the thing the engine is judged against, and an
+// oracle that delegates to the implementation it judges has stopped being one. The ep
+// rank-versus-side-to-move rule in particular is written twice, because it is the single
+// rule a symmetric parse/emit bug would hide perfectly.
+// -------------------------------------------------------------------------------------
+
+#[test]
+fn oracle_rejection_implies_parser_rejection() {
+    // The direction that matters. The oracle is the weaker checker -- structural only --
+    // so anything it refuses the engine's reader must refuse too. The converse is false
+    // and is pinned by name below.
+    for (fen, _) in corpus() {
+        if oracle::validate_fen(fen).is_err() {
+            assert!(
+                Board::from_fen_with_layout(fen).is_err(),
+                "{fen:?}: the oracle rejects this and the parser accepts it"
+            );
+        }
+    }
+}
+
+#[test]
+fn all_seven_fixture_fens_pass_both_validators() {
+    let cases = oracle::parse(ORACLE_TEXT).expect("fixture must parse");
+    for case in &cases {
+        assert!(
+            oracle::validate_fen(case.fen).is_ok(),
+            "{}: the oracle rejects its own fixture",
+            case.id
+        );
+        assert!(
+            Board::from_fen_with_layout(case.fen).is_ok(),
+            "{}: the parser rejects a published position",
+            case.id
+        );
+    }
+}
+
+#[test]
+fn the_two_validators_differ_only_where_named() {
+    // Named, so that a later reader "fixing" one side to match the other has to argue with
+    // this test rather than with a comment. Each of these is a rule `from_fen` can apply
+    // because it has a board, and `validate_fen` cannot because it is checking a string.
+
+    // 1. An en-passant square with no pawn that could have produced it.
+    let no_pusher = "4k3/8/8/8/8/8/8/4K3 b - e3 0 1";
+    assert!(oracle::validate_fen(no_pusher).is_ok());
+    assert!(matches!(
+        Board::from_fen(no_pusher),
+        Err(FenError::EnPassantNoDoublePushedPawn { .. })
+    ));
+
+    // 2. A castling right with no rook to exercise it.
+    let no_rook = "4k3/8/8/8/8/8/8/4K3 w K - 0 1";
+    assert!(oracle::validate_fen(no_rook).is_ok());
+    assert!(matches!(
+        Board::from_fen(no_rook),
+        Err(FenError::CastlingWithoutRook { .. })
+    ));
+
+    // 3. A counter wider than the board stores. The fixture validator has no board and so
+    //    no width to compare against.
+    let huge_clock = "4k3/8/8/8/8/8/8/4K3 w - - 999999 1";
+    assert!(oracle::validate_fen(huge_clock).is_ok());
+    assert!(matches!(
+        Board::from_fen(huge_clock),
+        Err(FenError::ClockOutOfRange { .. })
+    ));
+
+    // 4. And in the other direction: the four-field form the fixture stores Kiwipete in is
+    //    accepted by the oracle and by `from_fen_with_layout`, and refused by the strict
+    //    six-field `from_fen`.
+    let four = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -";
+    assert!(oracle::validate_fen(four).is_ok());
+    assert!(Board::from_fen_with_layout(four).is_ok());
+    assert!(matches!(
+        Board::from_fen(four),
+        Err(FenError::FieldCount { found: 4 })
+    ));
+}
+
+#[test]
+fn oracle_errors_carry_the_typed_cause() {
+    // D-0014 deferred this to issue #4 by name: "a caller that wants to branch on *why* a
+    // FEN was rejected cannot". Now it can, and the cause is reachable through
+    // `Error::source` as well as by matching.
+    let bad = "x | 4k3/8/8/8/8/8/8/4K4 w - - 0 1 | 1:20v";
+    let error = oracle::parse(bad).expect_err("nine files on rank 1");
+    let OracleError::MalformedFen { line, reason } = error else {
+        panic!("expected MalformedFen, got {error:?}");
+    };
+    assert_eq!(line, 1);
+    assert!(matches!(reason, FenError::RankWidth { rank: 1, files: 9 }));
+
+    let rebuilt = OracleError::MalformedFen { line, reason };
+    let source = std::error::Error::source(&rebuilt).expect("MalformedFen exposes its cause");
+    assert!(source.to_string().contains("9 files"), "{source}");
 }
