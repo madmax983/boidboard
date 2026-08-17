@@ -509,3 +509,55 @@ fn en_passant_target_follows_the_side_to_move() {
     board.set_en_passant(None);
     assert_eq!(board.en_passant_target(), None);
 }
+
+#[test]
+fn fixture_position_keys_are_pinned() {
+    // The seven oracle positions, keyed. These are what the table digest structurally
+    // cannot check: the digest fixes WHICH 781 keys exist, and these fix how a position
+    // selects among them — the flat index formula, the piece-index map, and which way up
+    // the board is. Each was derived from D-0020's scheme in Python, independently of this
+    // crate.
+    let expected: [(&str, u64, u64); 7] = [
+        ("startpos", 0x7CE2_53A8_B840_79FD, 0x01AE_05F1_3B46_7B94),
+        ("kiwipete", 0x998D_4B9B_8662_B558, 0x2EFE_F46E_C517_5B28),
+        ("position3", 0x8F03_15CA_1A0D_19BA, 0x8BAF_127A_E371_E9E7),
+        ("position4", 0x370B_C3F5_1661_AD3D, 0x0DC8_E87D_3846_F1C5),
+        (
+            "position4-mirror",
+            0x7828_78E1_369C_6919,
+            0xBE59_17D8_E691_6252,
+        ),
+        ("position5", 0x09DF_D9BE_2233_DDB0, 0xDA16_E412_2A14_A2FC),
+        ("position6", 0x049E_D70A_A68C_7929, 0x8666_1AC4_0159_FB23),
+    ];
+
+    let cases = boid_board::perft::oracle::parse(boid_board::perft::oracle::ORACLE_TEXT)
+        .expect("the committed fixture must parse");
+    assert_eq!(cases.len(), expected.len());
+
+    for (case, (id, key, pawn_key)) in cases.iter().zip(expected) {
+        assert_eq!(case.id, id, "fixture order changed");
+        let (board, _) =
+            Board::from_fen_with_layout(case.fen).unwrap_or_else(|e| panic!("{id}: {e}"));
+        assert_eq!(board.key(), key, "{id} key");
+        assert_eq!(board.pawn_key(), pawn_key, "{id} pawn key");
+        assert_eq!(board.key(), board.recomputed_key(), "{id}");
+    }
+}
+
+#[test]
+fn four_and_six_field_kiwipete_hash_identically() {
+    // The FEN layout is a property of the STRING, not of the position, so it must not reach
+    // the key. If a dialect bit lived inside Board it would be XORed in here — or, worse,
+    // would make two identical positions compare unequal (D-0024).
+    let four = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -";
+    let six = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
+
+    let (from_four, _) = Board::from_fen_with_layout(four).expect("four fields must parse");
+    let from_six = Board::from_fen(six).expect("six fields must parse");
+
+    assert_eq!(from_four.key(), 0x998D_4B9B_8662_B558);
+    assert_eq!(from_four.key(), from_six.key());
+    assert_eq!(from_four.pawn_key(), from_six.pawn_key());
+    assert_eq!(from_four, from_six, "and the boards themselves are equal");
+}

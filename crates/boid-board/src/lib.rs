@@ -13,10 +13,12 @@
 
 pub mod bitboard;
 pub mod board;
+pub mod fen;
 pub mod perft;
 pub mod types;
 pub mod zobrist;
 
 pub use bitboard::Bitboard;
 pub use board::Board;
+pub use fen::{FenError, FenLayout};
 pub use types::{CastlingRight, CastlingRights, Colour, File, Piece, PieceKind, Rank, Square};
