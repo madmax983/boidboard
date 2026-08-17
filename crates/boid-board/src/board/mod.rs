@@ -34,7 +34,20 @@
 use core::fmt;
 
 use crate::bitboard::Bitboard;
-use crate::types::{CastlingRights, Colour, File, Piece, PieceKind, Rank, Square};
+use crate::types::{CastlingRight, CastlingRights, Colour, File, Piece, PieceKind, Rank, Square};
+use crate::zobrist::ZOBRIST;
+
+/// The back rank of the starting position, a-file first. Both colours share it.
+const BACK_RANK: [PieceKind; 8] = [
+    PieceKind::Rook,
+    PieceKind::Knight,
+    PieceKind::Bishop,
+    PieceKind::Queen,
+    PieceKind::King,
+    PieceKind::Bishop,
+    PieceKind::Knight,
+    PieceKind::Rook,
+];
 
 /// A chess position.
 ///
@@ -149,13 +162,84 @@ impl Board {
     /// and this position makes none.
     #[must_use]
     pub fn empty() -> Board {
-        todo!("Board::empty")
+        Board {
+            pieces: [Bitboard::EMPTY; 6],
+            colours: [Bitboard::EMPTY; 2],
+            key: 0,
+            pawn_key: 0,
+            mailbox: [None; 64],
+            fullmove: 1,
+            stm: Colour::White,
+            castling: CastlingRights::NONE,
+            ep: None,
+            halfmove: 0,
+        }
     }
 
     /// The standard starting position.
     #[must_use]
     pub fn startpos() -> Board {
-        todo!("Board::startpos")
+        let mut board = Board::empty();
+
+        for (index, kind) in BACK_RANK.iter().enumerate() {
+            let file = File::from_index(index as u8).expect("eight files");
+            board.write_square(
+                Square::from_file_rank(file, Rank::R1),
+                Some(Piece::new(Colour::White, *kind)),
+            );
+            board.write_square(
+                Square::from_file_rank(file, Rank::R2),
+                Some(Piece::new(Colour::White, PieceKind::Pawn)),
+            );
+            board.write_square(
+                Square::from_file_rank(file, Rank::R7),
+                Some(Piece::new(Colour::Black, PieceKind::Pawn)),
+            );
+            board.write_square(
+                Square::from_file_rank(file, Rank::R8),
+                Some(Piece::new(Colour::Black, *kind)),
+            );
+        }
+
+        board.castling = CastlingRights::ALL;
+        board.key = board.recomputed_key();
+        board.pawn_key = board.recomputed_pawn_key();
+        board
+    }
+
+    /// Write `piece` into both representations at `square`, replacing whatever was there.
+    ///
+    /// Representation only: the hashes are **not** touched. Bulk construction seeds them
+    /// once at the end with a from-scratch computation, while the editing primitives in
+    /// [`edit`](crate::board::edit) maintain them incrementally around this call.
+    fn write_square(&mut self, square: Square, piece: Option<Piece>) {
+        if let Some(old) = self.mailbox[square.index() as usize] {
+            self.pieces[old.kind().index()] = self.pieces[old.kind().index()].without(square);
+            self.colours[old.colour().index()] = self.colours[old.colour().index()].without(square);
+        }
+        if let Some(new) = piece {
+            self.pieces[new.kind().index()] = self.pieces[new.kind().index()].with(square);
+            self.colours[new.colour().index()] = self.colours[new.colour().index()].with(square);
+        }
+        self.mailbox[square.index() as usize] = piece;
+    }
+
+    /// What the **bitboards** say stands on `square`, ignoring the mailbox entirely.
+    ///
+    /// The other half of the redundancy, used only by [`Board::consistency`]: asking the
+    /// mailbox would make the check compare the mailbox with itself.
+    fn piece_from_bitboards(&self, square: Square) -> Option<Piece> {
+        let colour = if self.colours[Colour::White.index()].contains(square) {
+            Colour::White
+        } else if self.colours[Colour::Black.index()].contains(square) {
+            Colour::Black
+        } else {
+            return None;
+        };
+        let kind = PieceKind::ALL
+            .into_iter()
+            .find(|kind| self.pieces[kind.index()].contains(square))?;
+        Some(Piece::new(colour, kind))
     }
 
     /// The squares occupied by pieces of this kind, either colour.
@@ -191,7 +275,9 @@ impl Board {
     /// FEN that describes one is rejected by the parser rather than by this accessor.
     #[must_use]
     pub fn king_square(&self, colour: Colour) -> Option<Square> {
-        todo!("Board::king_square({colour:?})")
+        (self.pieces(PieceKind::King) & self.colours(colour))
+            .into_iter()
+            .next()
     }
 
     /// The side to move.
@@ -265,13 +351,43 @@ impl Board {
     /// deliberate: it is what makes a round-trip test also a redundancy test (D-0019).
     #[must_use]
     pub fn recomputed_key(&self) -> u64 {
-        todo!("Board::recomputed_key")
+        let mut key = 0;
+
+        for colour in Colour::ALL {
+            for kind in PieceKind::ALL {
+                let piece = Piece::new(colour, kind);
+                for square in self.pieces(kind) & self.colours(colour) {
+                    key ^= ZOBRIST.piece_square(piece, square);
+                }
+            }
+        }
+
+        if self.stm == Colour::Black {
+            key ^= ZOBRIST.side_to_move();
+        }
+        for right in CastlingRight::ALL {
+            if self.castling.has(right) {
+                key ^= ZOBRIST.castling(right);
+            }
+        }
+        if let Some(file) = self.ep {
+            key ^= ZOBRIST.en_passant(file);
+        }
+
+        key
     }
 
     /// The pawn hash this position hashes to, computed from scratch.
     #[must_use]
     pub fn recomputed_pawn_key(&self) -> u64 {
-        todo!("Board::recomputed_pawn_key")
+        let mut key = 0;
+        for colour in Colour::ALL {
+            let piece = Piece::new(colour, PieceKind::Pawn);
+            for square in self.pieces(PieceKind::Pawn) & self.colours(colour) {
+                key ^= ZOBRIST.piece_square(piece, square);
+            }
+        }
+        key
     }
 
     /// Check the representation invariant: the bitboards agree with each other, the mailbox
@@ -285,7 +401,62 @@ impl Board {
     ///
     /// Returns the first [`Inconsistency`] found.
     pub fn consistency(&self) -> Result<(), Inconsistency> {
-        todo!("Board::consistency")
+        // 1. No square may be claimed by two kinds, or by both colours.
+        for (index, a) in PieceKind::ALL.into_iter().enumerate() {
+            for b in PieceKind::ALL.into_iter().skip(index + 1) {
+                if let Some(square) = (self.pieces(a) & self.pieces(b)).into_iter().next() {
+                    return Err(Inconsistency::KindsOverlap { a, b, square });
+                }
+            }
+        }
+        if let Some(square) = (self.colours(Colour::White) & self.colours(Colour::Black))
+            .into_iter()
+            .next()
+        {
+            return Err(Inconsistency::ColoursOverlap { square });
+        }
+
+        // 2. The two ways of asking "is this square occupied" must agree.
+        let by_kind = PieceKind::ALL
+            .into_iter()
+            .fold(Bitboard::EMPTY, |acc, kind| acc | self.pieces(kind));
+        let by_colour = self.colours(Colour::White) | self.colours(Colour::Black);
+        if let Some(square) = (by_kind ^ by_colour).into_iter().next() {
+            return Err(Inconsistency::ColourUnionIsNotOccupancy { square });
+        }
+
+        // 3. The mailbox must agree with the bitboards, on every square — including the
+        //    empty ones, where a stale entry is exactly the bug this catches.
+        for index in 0..64u8 {
+            let square = Square::new(index).expect("index below 64");
+            let bitboards = self.piece_from_bitboards(square);
+            let mailbox = self.mailbox[square.index() as usize];
+            if mailbox != bitboards {
+                return Err(Inconsistency::MailboxDisagreesWithBitboards {
+                    square,
+                    mailbox,
+                    bitboards,
+                });
+            }
+        }
+
+        // 4. Both hashes must be what this position actually hashes to.
+        let recomputed = self.recomputed_key();
+        if self.key != recomputed {
+            return Err(Inconsistency::KeyDrifted {
+                stored: self.key,
+                recomputed,
+            });
+        }
+        let recomputed = self.recomputed_pawn_key();
+        if self.pawn_key != recomputed {
+            return Err(Inconsistency::PawnKeyDrifted {
+                stored: self.pawn_key,
+                recomputed,
+            });
+        }
+
+        Ok(())
     }
 
     /// Whether the representation invariant holds.
