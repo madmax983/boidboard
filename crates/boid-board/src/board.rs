@@ -806,13 +806,47 @@ impl Board {
         }
     }
 
+    /// Put `piece` on an **empty** `square`.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, if the square is occupied.
+    pub(crate) fn place(&mut self, piece: Piece, square: Square) {
+        debug_assert!(
+            self.mailbox[square.index()].is_none(),
+            "place({piece:?}, {square}) onto an occupied square"
+        );
+        self.toggle(piece, square);
+    }
+
+    /// Take `piece` off `square`, where it must already stand.
+    ///
+    /// Asymmetric with [`Board::place`] on purpose. `toggle` alone is symmetric, so a
+    /// caller that computed the wrong square ADDS a piece where it meant to remove one —
+    /// and because the XOR is its own inverse, every invariant still agrees afterwards.
+    /// That is a piece created from nothing with `check_invariants()` returning `Ok`, and
+    /// it is what these two wrappers exist to make impossible.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, if `piece` is not the piece standing on `square`.
+    pub(crate) fn remove(&mut self, piece: Piece, square: Square) {
+        debug_assert_eq!(
+            self.mailbox[square.index()],
+            Some(piece),
+            "remove({piece:?}, {square}) but that piece is not there"
+        );
+        self.toggle(piece, square);
+    }
+
     /// Add or remove `piece` on `square`, keeping the bitboards, the mailbox and both keys
     /// in step.
     ///
     /// The single place any of those four is written, which is what makes them able to
     /// disagree only through a bug in this function rather than through a bug in any
-    /// caller.
-    pub(crate) fn toggle(&mut self, piece: Piece, square: Square) {
+    /// caller. Prefer [`Board::place`] and [`Board::remove`], which say which direction
+    /// they mean and check it.
+    fn toggle(&mut self, piece: Piece, square: Square) {
         let kind = piece.kind().index();
         let color = piece.color().index();
         if self.mailbox[square.index()].is_some() {

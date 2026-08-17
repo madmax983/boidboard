@@ -61,6 +61,8 @@ pub struct Move(u16);
 /// Why a UCI string could not be read as a move.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MoveParseError {
+    /// A byte outside US-ASCII. Checked first, because the parser slices by byte offset.
+    NotAscii,
     /// Not four or five characters.
     BadLength,
     /// One of the two squares was not a coordinate.
@@ -79,6 +81,7 @@ pub enum MoveParseError {
 impl fmt::Display for MoveParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::NotAscii => "a UCI move is ASCII; this string is not",
             Self::BadLength => "a UCI move is four characters, or five for a promotion",
             Self::BadSquare => "one of the squares is not a coordinate",
             Self::BadPromotionPiece => "the promotion piece must be one of n, b, r, q",
@@ -121,6 +124,16 @@ pub enum MoveNotApplicable {
     NotAPromotion,
     /// A double push that is not a pawn's, is not from the pawn's home rank, or is blocked.
     NotADoublePush,
+    /// The move would capture a king.
+    CapturesAKing,
+    /// A move flagged as castling whose mover is not a king.
+    NotAKingMove,
+    /// A move flagged as castling whose squares are not a king's castling pair.
+    NotACastlingSquarePair,
+    /// An en-passant capture that is not a pawn's diagonal step.
+    NotAPawnCaptureStep,
+    /// A promotion that is not a pawn's single-rank step.
+    NotAPawnStep,
     /// A pawn move onto the last rank that does not promote.
     ///
     /// Its own variant because the board it would produce is not FEN-representable at all:
@@ -147,6 +160,15 @@ impl fmt::Display for MoveNotApplicable {
             Self::CastlingRightAbsent => write!(f, "that castling right is not available"),
             Self::CastlingPathOccupied => write!(f, "the castling path is not empty"),
             Self::NotAPromotion => write!(f, "that move does not promote"),
+            Self::CapturesAKing => write!(f, "a king cannot be captured"),
+            Self::NotAKingMove => write!(f, "a castling move must be made by a king"),
+            Self::NotACastlingSquarePair => {
+                write!(f, "a castling move must run e1-g1, e1-c1, e8-g8 or e8-c8")
+            }
+            Self::NotAPawnCaptureStep => {
+                write!(f, "that is not a pawn's diagonal capturing step")
+            }
+            Self::NotAPawnStep => write!(f, "that is not a pawn's forward step"),
             Self::NotADoublePush => write!(f, "that move is not an available double push"),
             Self::PawnWouldNotPromote => write!(
                 f,
@@ -168,6 +190,17 @@ impl Move {
     #[must_use]
     pub const fn new(from: Square, to: Square, kind: MoveKind) -> Option<Self> {
         if from.index() == to.index() {
+            return None;
+        }
+        // A pawn promotes to one of four pieces. Coercing the other two to a queen -- which
+        // the flag encoding would otherwise do silently -- breaks the round trip a caller
+        // is entitled to assume: `Move::new(f, t, k).kind() == k`.
+        if let MoveKind::Promotion(promoted) | MoveKind::PromoCapture(promoted) = kind
+            && !matches!(
+                promoted,
+                PieceKind::Knight | PieceKind::Bishop | PieceKind::Rook | PieceKind::Queen
+            )
+        {
             return None;
         }
         let flags = kind_to_flags(kind);
@@ -260,6 +293,12 @@ impl Move {
     /// Returns [`MoveParseError`] if the string is malformed or names a square holding no
     /// piece of the side to move.
     pub fn from_uci(text: &str, board: &Board) -> Result<Self, MoveParseError> {
+        // Non-ASCII first, exactly as `Board::from_fen` does. `text.len()` is BYTES, and
+        // the slices below assume char boundaries: without this, a four-byte string with a
+        // multibyte character straddling index 2 panics out of a Result-returning function.
+        if !text.is_ascii() {
+            return Err(MoveParseError::NotAscii);
+        }
         if text.len() != 4 && text.len() != 5 {
             return Err(MoveParseError::BadLength);
         }
@@ -297,14 +336,8 @@ impl Move {
             }
         } else if promotion.is_some() {
             return Err(MoveParseError::PromotionMismatch);
-        } else if piece.kind() == PieceKind::King
-            && from.file().index().abs_diff(to.file().index()) == 2
-        {
-            if to.file().index() > from.file().index() {
-                MoveKind::KingCastle
-            } else {
-                MoveKind::QueenCastle
-            }
+        } else if let Some(castle) = castling_kind(piece, from, to) {
+            castle
         } else if piece.kind() == PieceKind::Pawn && from.rank().abs_diff(to.rank()) == 2 {
             MoveKind::DoublePawnPush
         } else if piece.kind() == PieceKind::Pawn
@@ -436,31 +469,31 @@ impl Board {
                 let square = en_passant_victim_square(mv.to(), mover)
                     .expect("an en-passant destination always has a square behind it");
                 let victim = Piece::new(mover.flip(), PieceKind::Pawn);
-                board.toggle(victim, square);
+                board.remove(victim, square);
             }
             MoveKind::Capture | MoveKind::PromoCapture(_) => {
                 let victim = self
                     .piece_at(mv.to())
                     .expect("a capture requires a piece on the destination");
-                board.toggle(victim, mv.to());
+                board.remove(victim, mv.to());
             }
             _ => {}
         }
 
         // 2. The mover leaves its origin and arrives — as a different piece, if promoting.
-        board.toggle(piece, mv.from());
+        board.remove(piece, mv.from());
         match mv.kind() {
             MoveKind::Promotion(kind) | MoveKind::PromoCapture(kind) => {
-                board.toggle(Piece::new(mover, kind), mv.to());
+                board.place(Piece::new(mover, kind), mv.to());
             }
-            _ => board.toggle(piece, mv.to()),
+            _ => board.place(piece, mv.to()),
         }
 
         // 3. Castling moves a rook too.
         if let Some((rook_from, rook_to)) = castling_rook_squares(mv.kind(), mover) {
             let rook = Piece::new(mover, PieceKind::Rook);
-            board.toggle(rook, rook_from);
-            board.toggle(rook, rook_to);
+            board.remove(rook, rook_from);
+            board.place(rook, rook_to);
         }
 
         // 4. Rights are revoked by BOTH squares. Applying the table to `to` as well as to
@@ -529,6 +562,13 @@ impl Board {
         if destination.is_some_and(|p| p.color() == mover) {
             return Err(MoveNotApplicable::OwnPieceOnDestination);
         }
+        // A king is never captured in chess, and a board missing one is not
+        // FEN-representable, so allowing it would let apply_move build a position from_fen
+        // rejects -- D-0026's rule. This is a structural fact about the RESULT, so it needs
+        // no attack table and stays inside D-0023's seam.
+        if destination.is_some_and(|p| p.kind() == PieceKind::King) {
+            return Err(MoveNotApplicable::CapturesAKing);
+        }
 
         let kind = mv.kind();
         let disagrees = Err(MoveNotApplicable::KindDisagreesWithBoard { claimed: kind });
@@ -556,6 +596,12 @@ impl Board {
                 if self.ep_square() != Some(mv.to()) {
                     return Err(MoveNotApplicable::NotTheEnPassantSquare);
                 }
+                // The capturing pawn must actually be beside the victim. Without this, a
+                // pawn anywhere on the board could be flagged EnPassant and would teleport
+                // onto the target while the victim vanished.
+                if !is_pawn_capture_step(piece, mv.from(), mv.to()) {
+                    return Err(MoveNotApplicable::NotAPawnCaptureStep);
+                }
             }
             MoveKind::Promotion(_) | MoveKind::PromoCapture(_) => {
                 if piece.kind() != PieceKind::Pawn || mv.to().rank() != last_rank {
@@ -563,6 +609,15 @@ impl Board {
                 }
                 if matches!(kind, MoveKind::PromoCapture(_)) == destination.is_none() {
                     return disagrees;
+                }
+                // A promotion is still a pawn move: straight ahead one rank, or one rank
+                // diagonally when capturing.
+                let straight = mv.from().file() == mv.to().file() && destination.is_none();
+                if !straight && !is_pawn_capture_step(piece, mv.from(), mv.to()) {
+                    return Err(MoveNotApplicable::NotAPawnStep);
+                }
+                if mv.from().rank().abs_diff(mv.to().rank()) != 1 {
+                    return Err(MoveNotApplicable::NotAPawnStep);
                 }
             }
             MoveKind::DoublePawnPush => {
@@ -584,6 +639,17 @@ impl Board {
                 }
             }
             MoveKind::KingCastle | MoveKind::QueenCastle => {
+                // The single most dangerous hole this review found. Without these two
+                // checks, ANY piece on ANY square could be flagged KingCastle: apply_move
+                // would move it to the destination and then unconditionally toggle a rook
+                // on the corner squares -- MINTING a rook where none stood, or deleting
+                // one, with every invariant still agreeing because toggle() is symmetric.
+                if piece.kind() != PieceKind::King {
+                    return Err(MoveNotApplicable::NotAKingMove);
+                }
+                if castling_kind(piece, mv.from(), mv.to()) != Some(kind) {
+                    return Err(MoveNotApplicable::NotACastlingSquarePair);
+                }
                 let right = match (kind, mover) {
                     (MoveKind::KingCastle, Color::White) => CastlingRights::WHITE_KING,
                     (MoveKind::QueenCastle, Color::White) => CastlingRights::WHITE_QUEEN,
@@ -606,6 +672,46 @@ impl Board {
 
         Ok(self.apply_move(mv))
     }
+}
+
+/// The castling kind a king moving `from` -> `to` denotes, if any.
+///
+/// Requires the exact home-square pair, so a king wandering two files anywhere else on the
+/// board is an ordinary move rather than a castle.
+#[must_use]
+pub(crate) fn castling_kind(piece: Piece, from: Square, to: Square) -> Option<MoveKind> {
+    if piece.kind() != PieceKind::King {
+        return None;
+    }
+    let (king_home, king_side, queen_side) = match piece.color() {
+        Color::White => (Square::E1, 6u8, 2u8),
+        Color::Black => (Square::E8, 62, 58),
+    };
+    if from != king_home {
+        return None;
+    }
+    let to_index = to.index() as u8;
+    if to_index == king_side {
+        Some(MoveKind::KingCastle)
+    } else if to_index == queen_side {
+        Some(MoveKind::QueenCastle)
+    } else {
+        None
+    }
+}
+
+/// Whether `from` -> `to` is a pawn's one-square diagonal capturing step, forwards.
+#[must_use]
+pub(crate) fn is_pawn_capture_step(piece: Piece, from: Square, to: Square) -> bool {
+    if piece.kind() != PieceKind::Pawn {
+        return false;
+    }
+    let forward = match piece.color() {
+        Color::White => 1i8,
+        Color::Black => -1,
+    };
+    from.file().index().abs_diff(to.file().index()) == 1
+        && i16::from(to.rank()) - i16::from(from.rank()) == i16::from(forward)
 }
 
 /// The square the pawn captured en passant actually stands on.

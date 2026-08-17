@@ -304,12 +304,16 @@ impl Board {
         // split(' '), never split_whitespace: the latter would silently re-admit the
         // separators the check above exists to reject, and would also swallow the empty
         // fields that a doubled or leading space produces.
-        let fields: Vec<&str> = fen.split(' ').collect();
-        let six = match fields.len() {
+        // Counted before collecting. `collect()` on a megabyte of spaces allocates a Vec
+        // with a million entries before anyone looks at its length, and an allocation
+        // failure aborts the process rather than unwinding -- which no caller can contain.
+        let found = fen.split(' ').count();
+        let six = match found {
             4 => false,
             6 => true,
-            found => return Err(FenError::WrongFieldCount { found }),
+            _ => return Err(FenError::WrongFieldCount { found }),
         };
+        let fields: Vec<&str> = fen.split(' ').collect();
 
         for (field, name) in [
             (fields[0], FenField::Placement),
@@ -467,7 +471,7 @@ fn parse_placement(board: &mut Board, placement: &str) -> Result<(), FenError> {
             if piece.kind() == PieceKind::Pawn && (rank == 0 || rank == 7) {
                 return Err(FenError::PawnOnBackRank { square });
             }
-            board.toggle(piece, square);
+            board.place(piece, square);
             file += 1;
         }
 

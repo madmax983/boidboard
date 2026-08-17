@@ -522,6 +522,25 @@ fn never_panics_on_mutations_of_a_valid_fen() {
     );
 }
 
+/// A pathological input is rejected without materialising a field per separator.
+///
+/// `split(' ').collect::<Vec<_>>()` on a megabyte of spaces builds a million-entry `Vec`
+/// before anyone reads its length, and an allocation failure ABORTS the process rather than
+/// unwinding — which no caller can contain. Counting first is O(1) in space. This test
+/// cannot observe the allocation directly; it pins the behaviour and the reason is in the
+/// parser's comment.
+#[test]
+fn a_pathological_separator_run_is_rejected_by_field_count() {
+    for len in [1_000usize, 100_000, 1_000_000] {
+        let spaces = " ".repeat(len);
+        assert_eq!(
+            Board::from_fen(&spaces),
+            Err(FenError::WrongFieldCount { found: len + 1 }),
+            "a run of {len} separators must be rejected on its field count"
+        );
+    }
+}
+
 /// The other half: inputs that are not mutations of anything valid.
 #[test]
 fn never_panics_on_adversarial_inputs() {
